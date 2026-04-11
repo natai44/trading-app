@@ -1983,7 +1983,7 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                 </div>
 
                 
-                <div class="section-title">Smart Money Confluence</div>
+                <div class="section-title">Smart Money Confluence / Fibonacci</div>
                 <div class="info-list">
                     <div class="info-item"><div class="info-label">Preferred Side</div><div class="info-value">{signal['preferred_side']}</div></div>
                     <div class="info-item"><div class="info-label">Session</div><div class="info-value">{signal['session_name']}</div></div>
@@ -2017,10 +2017,14 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                     <div class="info-item"><div class="info-label">5M SELL</div><div class="info-value">{signal['m5_sell_status']}</div></div>
                     <div class="info-item"><div class="info-label">5M BUY Entry/SL</div><div class="info-value">{format_price(signal['m5_buy_entry'])} / {format_price(signal['m5_buy_sl'])}</div></div>
                     <div class="info-item"><div class="info-label">5M SELL Entry/SL</div><div class="info-value">{format_price(signal['m5_sell_entry'])} / {format_price(signal['m5_sell_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">5M BUY TP1 / TP2</div><div class="info-value">{format_price(signal['m5_buy_tp1'])} / {format_price(signal['m5_buy_tp2'])}</div></div>
+                    <div class="info-item"><div class="info-label">5M SELL TP1 / TP2</div><div class="info-value">{format_price(signal['m5_sell_tp1'])} / {format_price(signal['m5_sell_tp2'])}</div></div>
                     <div class="info-item"><div class="info-label">15M BUY</div><div class="info-value">{signal['m15_buy_status']}</div></div>
                     <div class="info-item"><div class="info-label">15M SELL</div><div class="info-value">{signal['m15_sell_status']}</div></div>
                     <div class="info-item"><div class="info-label">15M BUY Entry/SL</div><div class="info-value">{format_price(signal['m15_buy_entry'])} / {format_price(signal['m15_buy_sl'])}</div></div>
                     <div class="info-item"><div class="info-label">15M SELL Entry/SL</div><div class="info-value">{format_price(signal['m15_sell_entry'])} / {format_price(signal['m15_sell_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">15M BUY TP1 / TP2</div><div class="info-value">{format_price(signal['m15_buy_tp1'])} / {format_price(signal['m15_buy_tp2'])}</div></div>
+                    <div class="info-item"><div class="info-label">15M SELL TP1 / TP2</div><div class="info-value">{format_price(signal['m15_sell_tp1'])} / {format_price(signal['m15_sell_tp2'])}</div></div>
                 </div>
 
 <div class="section-title">Signal Erklaerung</div>
