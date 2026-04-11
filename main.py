@@ -835,7 +835,6 @@ def evaluate_signal_engine(mtf):
     daily_info = mtf["daily_info"]
 
     current_price = m5["current_price"]
-
     last_day_high = daily_info["last_day_high"]
     last_day_low = daily_info["last_day_low"]
     today_open = daily_info["today_open"]
@@ -845,22 +844,16 @@ def evaluate_signal_engine(mtf):
 
     day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
 
-    reasons = []
-
-    # -------------------------------------------------
-    # BUY / SELL ZONES ALWAYS VISIBLE
-    # -------------------------------------------------
+    # Always visible zones
     buy_zone_low = min(last_day_low + day_range * 0.10, h1["support"])
     buy_zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
-    buy_prep_entry = (buy_zone_low + buy_zone_high) / 2
+    buy_entry = (buy_zone_low + buy_zone_high) / 2
 
     sell_zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
     sell_zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
-    sell_prep_entry = (sell_zone_low + sell_zone_high) / 2
+    sell_entry = (sell_zone_low + sell_zone_high) / 2
 
-    # -------------------------------------------------
-    # MAIN RULES FROM USER
-    # -------------------------------------------------
+    # Your rules
     buy_sl = last_h1_low
     buy_tp_medium = last_h1_high
     buy_tp_large = last_day_high
@@ -869,89 +862,80 @@ def evaluate_signal_engine(mtf):
     sell_tp_medium = last_h1_low
     sell_tp_large = last_day_low
 
-    buy_risk = buy_prep_entry - buy_sl
+    buy_risk = buy_entry - buy_sl
     if buy_risk <= 0:
-        buy_risk = max(m5["atr"] * 1.2, abs(buy_prep_entry) * 0.001)
+        buy_risk = max(m5["atr"] * 1.2, abs(buy_entry) * 0.001)
 
-    sell_risk = sell_sl - sell_prep_entry
+    sell_risk = sell_sl - sell_entry
     if sell_risk <= 0:
-        sell_risk = max(m5["atr"] * 1.2, abs(sell_prep_entry) * 0.001)
+        sell_risk = max(m5["atr"] * 1.2, abs(sell_entry) * 0.001)
 
-    buy_tp1 = buy_prep_entry + buy_risk * 1.0
-    buy_tp2 = buy_prep_entry + buy_risk * 1.5
+    buy_tp1 = buy_entry + buy_risk * 1.0
+    buy_tp2 = buy_entry + buy_risk * 1.5
 
-    sell_tp1 = sell_prep_entry - sell_risk * 1.0
-    sell_tp2 = sell_prep_entry - sell_risk * 1.5
+    sell_tp1 = sell_entry - sell_risk * 1.0
+    sell_tp2 = sell_entry - sell_risk * 1.5
 
-    # -------------------------------------------------
-    # 5M PREPARATION
-    # -------------------------------------------------
+    # 5m prep
     m5_possible_side = "WAIT"
+    m5_status = "NO 5M MOVE"
     m5_entry = current_price
     m5_sl = None
     m5_tp1 = None
     m5_tp2 = None
-    m5_status = "NO 5M MOVE"
 
     if m5["trend"] == "BULLISH":
         m5_possible_side = "BUY"
         m5_sl = last_h1_low
-        m5_risk = max(m5_entry - m5_sl, m5["atr"] * 1.2, 1e-9)
-        m5_tp1 = m5_entry + m5_risk * 1.0
-        m5_tp2 = m5_entry + m5_risk * 1.5
+        rr = max(m5_entry - m5_sl, m5["atr"] * 1.2, 1e-9)
+        m5_tp1 = m5_entry + rr * 1.0
+        m5_tp2 = m5_entry + rr * 1.5
         m5_status = "5M BUY PREPARATION"
-
         if m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH":
             m5_status = "5M BUY ENTRY READY"
 
     elif m5["trend"] == "BEARISH":
         m5_possible_side = "SELL"
         m5_sl = last_h1_high
-        m5_risk = max(m5_sl - m5_entry, m5["atr"] * 1.2, 1e-9)
-        m5_tp1 = m5_entry - m5_risk * 1.0
-        m5_tp2 = m5_entry - m5_risk * 1.5
+        rr = max(m5_sl - m5_entry, m5["atr"] * 1.2, 1e-9)
+        m5_tp1 = m5_entry - rr * 1.0
+        m5_tp2 = m5_entry - rr * 1.5
         m5_status = "5M SELL PREPARATION"
-
         if m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH":
             m5_status = "5M SELL ENTRY READY"
 
-    # -------------------------------------------------
-    # 15M PREPARATION
-    # -------------------------------------------------
+    # 15m prep
     m15_possible_side = "WAIT"
+    m15_status = "NO 15M MOVE"
     m15_entry = current_price
     m15_sl = None
     m15_tp1 = None
     m15_tp2 = None
-    m15_status = "NO 15M MOVE"
 
     if m15["trend"] == "BULLISH":
         m15_possible_side = "BUY"
         m15_sl = last_h1_low
-        m15_risk = max(m15_entry - m15_sl, m15["atr"] * 1.2, 1e-9)
-        m15_tp1 = m15_entry + m15_risk * 1.0
-        m15_tp2 = m15_entry + m15_risk * 1.5
+        rr = max(m15_entry - m15_sl, m15["atr"] * 1.2, 1e-9)
+        m15_tp1 = m15_entry + rr * 1.0
+        m15_tp2 = m15_entry + rr * 1.5
         m15_status = "15M BUY PREPARATION"
-
         if m15["bos"] == "BULLISH BOS" or m15["choch"] == "BULLISH CHOCH":
             m15_status = "15M BUY ENTRY READY"
 
     elif m15["trend"] == "BEARISH":
         m15_possible_side = "SELL"
         m15_sl = last_h1_high
-        m15_risk = max(m15_sl - m15_entry, m15["atr"] * 1.2, 1e-9)
-        m15_tp1 = m15_entry - m15_risk * 1.0
-        m15_tp2 = m15_entry - m15_risk * 1.5
+        rr = max(m15_sl - m15_entry, m15["atr"] * 1.2, 1e-9)
+        m15_tp1 = m15_entry - rr * 1.0
+        m15_tp2 = m15_entry - rr * 1.5
         m15_status = "15M SELL PREPARATION"
-
         if m15["bos"] == "BEARISH BOS" or m15["choch"] == "BEARISH CHOCH":
             m15_status = "15M SELL ENTRY READY"
 
-    # -------------------------------------------------
-    # MAIN BUY / SELL SCORES
-    # -------------------------------------------------
+    # Scores
     buy_score = 0
     sell_score = 0
+    reasons = []
 
     if d1["trend"] == "BULLISH":
         buy_score += 20
@@ -975,30 +959,24 @@ def evaluate_signal_engine(mtf):
 
     if current_price <= m5["discount_zone"]:
         buy_score += 10
-        reasons.append("Preis liegt in/nahe Discount Zone -> Buy Seite interessanter.")
     if current_price >= m5["premium_zone"]:
         sell_score += 10
-        reasons.append("Preis liegt in/nahe Premium Zone -> Sell Seite interessanter.")
 
     if buy_zone_low <= current_price <= buy_zone_high:
         buy_score += 18
-        reasons.append("Preis ist in der Buy Zone.")
+        reasons.append("Preis in Buy Zone.")
     elif current_price > buy_zone_high:
         buy_score += 6
-        reasons.append("Preis ist ueber der Buy Zone, Ruecklauf moeglich.")
     else:
         buy_score += 4
-        reasons.append("Preis ist unter der Buy Zone, Reaktion spaeter moeglich.")
 
     if sell_zone_low <= current_price <= sell_zone_high:
         sell_score += 18
-        reasons.append("Preis ist in der Sell Zone.")
+        reasons.append("Preis in Sell Zone.")
     elif current_price < sell_zone_low:
         sell_score += 6
-        reasons.append("Preis ist unter der Sell Zone, Ruecklauf moeglich.")
     else:
         sell_score += 4
-        reasons.append("Preis ist ueber der Sell Zone, Reaktion spaeter moeglich.")
 
     if m5_possible_side == "BUY":
         buy_score += 5
@@ -1010,9 +988,6 @@ def evaluate_signal_engine(mtf):
     elif m15_possible_side == "SELL":
         sell_score += 8
 
-    # -------------------------------------------------
-    # PREFERRED SIDE
-    # -------------------------------------------------
     if buy_score > sell_score + 8:
         preferred_side = "BUY"
     elif sell_score > buy_score + 8:
@@ -1020,9 +995,7 @@ def evaluate_signal_engine(mtf):
     else:
         preferred_side = "RANGE / WAIT"
 
-    # -------------------------------------------------
-    # FINAL MAIN SIGNAL
-    # -------------------------------------------------
+    # Never return NO CLEAR ZONE anymore
     signal_type = "BOTH ZONES VISIBLE"
     signal_status = "WAIT - WATCH BUY & SELL ZONES"
 
@@ -1036,17 +1009,16 @@ def evaluate_signal_engine(mtf):
     zone_high = None
 
     if preferred_side == "BUY":
+        signal_type = "BUY SIDE PREPARATION"
+        signal_status = "WATCH BUY ZONE"
         zone_low = buy_zone_low
         zone_high = buy_zone_high
-        entry_price = buy_prep_entry
+        entry_price = buy_entry
         sl_price = buy_sl
         tp1 = buy_tp1
         tp2 = buy_tp2
         tp_medium = buy_tp_medium
         tp_large = buy_tp_large
-
-        signal_type = "BUY SIDE PREPARATION"
-        signal_status = "WATCH BUY ZONE"
 
         if buy_zone_low <= current_price <= buy_zone_high:
             signal_type = "BUY ZONE ACTIVE"
@@ -1057,17 +1029,16 @@ def evaluate_signal_engine(mtf):
             signal_status = "ENTRY POSSIBLE"
 
     elif preferred_side == "SELL":
+        signal_type = "SELL SIDE PREPARATION"
+        signal_status = "WATCH SELL ZONE"
         zone_low = sell_zone_low
         zone_high = sell_zone_high
-        entry_price = sell_prep_entry
+        entry_price = sell_entry
         sl_price = sell_sl
         tp1 = sell_tp1
         tp2 = sell_tp2
         tp_medium = sell_tp_medium
         tp_large = sell_tp_large
-
-        signal_type = "SELL SIDE PREPARATION"
-        signal_status = "WATCH SELL ZONE"
 
         if sell_zone_low <= current_price <= sell_zone_high:
             signal_type = "SELL ZONE ACTIVE"
@@ -1101,29 +1072,26 @@ def evaluate_signal_engine(mtf):
         "last_h1_high": last_h1_high,
         "last_h1_low": last_h1_low,
 
-        # buy side always visible
         "buy_score": buy_score,
         "buy_zone_low": buy_zone_low,
         "buy_zone_high": buy_zone_high,
-        "buy_entry": buy_prep_entry,
+        "buy_entry": buy_entry,
         "buy_sl": buy_sl,
         "buy_tp1": buy_tp1,
         "buy_tp2": buy_tp2,
         "buy_tp_medium": buy_tp_medium,
         "buy_tp_large": buy_tp_large,
 
-        # sell side always visible
         "sell_score": sell_score,
         "sell_zone_low": sell_zone_low,
         "sell_zone_high": sell_zone_high,
-        "sell_entry": sell_prep_entry,
+        "sell_entry": sell_entry,
         "sell_sl": sell_sl,
         "sell_tp1": sell_tp1,
         "sell_tp2": sell_tp2,
         "sell_tp_medium": sell_tp_medium,
         "sell_tp_large": sell_tp_large,
 
-        # 5m preparation
         "m5_possible_side": m5_possible_side,
         "m5_status": m5_status,
         "m5_entry": m5_entry,
@@ -1131,7 +1099,6 @@ def evaluate_signal_engine(mtf):
         "m5_tp1": m5_tp1,
         "m5_tp2": m5_tp2,
 
-        # 15m preparation
         "m15_possible_side": m15_possible_side,
         "m15_status": m15_status,
         "m15_entry": m15_entry,
@@ -1142,6 +1109,7 @@ def evaluate_signal_engine(mtf):
         "explanation": explanation,
         "timeframe_note": "D1 + H1 = main direction | 15m = medium preparation | 5m = fast preparation / entry",
     }
+
 
 def get_latest_signal(market: str, symbol: str):
     conn = db_conn()
