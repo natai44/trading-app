@@ -15,8 +15,8 @@ app = FastAPI(title="Trading Mentor App Final")
 DB_PATH = "app.db"
 TWELVE_DATA_API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
 
-DEFAULT_ADMIN_USERNAME = "abdinata"
-DEFAULT_ADMIN_PASSWORD = "Nhatty1996#"
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin123"
 DEFAULT_ADMIN_EMAIL = "abdisanatai@gmail.com"
 
 DEFAULT_USER_USERNAME = "user"
@@ -382,6 +382,27 @@ def init_db():
             last_h1_low REAL,
             explanation TEXT,
             timeframe_note TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            signal_status TEXT NOT NULL,
+            signal_score REAL NOT NULL,
+            entry_price REAL,
+            sl_price REAL,
+            tp1 REAL,
+            tp2 REAL,
+            tp_medium REAL,
+            tp_large REAL,
+            message TEXT,
             created_at TEXT NOT NULL
         )
     """)
@@ -1471,8 +1492,181 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
 
 
+
+def safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def send_telegram_message(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
+    except Exception:
+        pass
+
+
+def build_alert_type_and_severity(signal: dict):
+    signal_type = signal.get("signal_type", "")
+    score = safe_float(signal.get("signal_score")) or 0
+
+    if signal_type in ["BUY ENTRY READY", "BUY 5M SETUP"] and score >= 55:
+        return "BUY_SETUP_READY", "high"
+    if signal_type in ["SELL ENTRY READY", "SELL 5M SETUP"] and score >= 55:
+        return "SELL_SETUP_READY", "high"
+    if signal_type == "BUY ZONE ACTIVE" and score >= 45:
+        return "BUY_ZONE_ACTIVE", "medium"
+    if signal_type == "SELL ZONE ACTIVE" and score >= 45:
+        return "SELL_ZONE_ACTIVE", "medium"
+    if signal_type in ["BUY SIDE PREPARATION", "SELL SIDE PREPARATION", "BOTH ZONES VISIBLE"] and score >= 35:
+        return "MARKET_PREPARATION", "low"
+    return None, None
+
+
+def build_alert_message(market: str, symbol: str, signal: dict, alert_type: str):
+    preferred = signal.get("preferred_side", "-")
+    entry = format_price(signal.get("entry_price"))
+    sl = format_price(signal.get("sl_price"))
+    tp1 = format_price(signal.get("tp1"))
+    tp2 = format_price(signal.get("tp2"))
+    tp_medium = format_price(signal.get("tp_medium"))
+    tp_large = format_price(signal.get("tp_large"))
+    buy_zone = f"{format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}"
+    sell_zone = f"{format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}"
+    score = signal.get("signal_score", 0)
+
+    if alert_type == "BUY_SETUP_READY":
+        title = "🚀 BUY SETUP READY"
+    elif alert_type == "SELL_SETUP_READY":
+        title = "🔥 SELL SETUP READY"
+    elif alert_type == "BUY_ZONE_ACTIVE":
+        title = "⚠️ BUY ZONE ACTIVE"
+    elif alert_type == "SELL_ZONE_ACTIVE":
+        title = "⚠️ SELL ZONE ACTIVE"
+    else:
+        title = "🧭 MARKET PREPARATION"
+
+    return (
+        f"{title}\n"
+        f"Market: {market.upper()} | Symbol: {symbol}\n"
+        f"Signal: {signal.get('signal_type', '-')}\n"
+        f"Preferred: {preferred} | Score: {score}\n"
+        f"Buy Zone: {buy_zone}\n"
+        f"Sell Zone: {sell_zone}\n"
+        f"Entry: {entry}\n"
+        f"SL: {sl}\n"
+        f"TP1 / TP2: {tp1} / {tp2}\n"
+        f"TP M / L: {tp_medium} / {tp_large}"
+    )
+
+
+def store_alert_if_new(market: str, symbol: str, signal: dict):
+    alert_type, severity = build_alert_type_and_severity(signal)
+    if not alert_type:
+        return None
+
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM alert_history
+        WHERE market = ? AND symbol = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (market, symbol))
+    latest = cur.fetchone()
+
+    changed = True
+    if latest:
+        same_type = latest["alert_type"] == alert_type
+        same_signal = latest["signal_type"] == signal.get("signal_type")
+        same_status = latest["signal_status"] == signal.get("signal_status")
+        score_diff_small = abs(float(latest["signal_score"]) - float(signal.get("signal_score", 0))) < 4
+        if same_type and same_signal and same_status and score_diff_small:
+            changed = False
+
+    if not changed:
+        conn.close()
+        return None
+
+    message = build_alert_message(market, symbol, signal, alert_type)
+    cur.execute("""
+        INSERT INTO alert_history (
+            market, symbol, alert_type, severity, signal_type, signal_status, signal_score,
+            entry_price, sl_price, tp1, tp2, tp_medium, tp_large, message, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        market, symbol, alert_type, severity, signal.get("signal_type", "-"), signal.get("signal_status", "-"),
+        signal.get("signal_score", 0), signal.get("entry_price"), signal.get("sl_price"),
+        signal.get("tp1"), signal.get("tp2"), signal.get("tp_medium"), signal.get("tp_large"),
+        message, now_iso()
+    ))
+    conn.commit()
+    conn.close()
+    return {"alert_type": alert_type, "severity": severity, "message": message}
+
+
+def maybe_send_telegram_alert(market: str, symbol: str, alert_obj):
+    if not alert_obj:
+        return
+    if symbol.strip().upper() not in ["BTCUSDT", "XAU/USD", "XAUUSD"]:
+        return
+
+    key = f"{market}:{symbol}:{alert_obj['alert_type']}"
+    now = time.time()
+    last_sent = LAST_TELEGRAM_ALERTS.get(key, 0)
+    if now - last_sent < TELEGRAM_ALERT_COOLDOWN:
+        return
+
+    send_telegram_message(alert_obj["message"])
+    LAST_TELEGRAM_ALERTS[key] = now
+
+
+def get_alert_history(limit: int = 20):
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM alert_history
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def alert_scan_loop():
+    while True:
+        try:
+            for market, symbol in ALERT_SYMBOLS:
+                try:
+                    mtf = get_multi_timeframe_analysis(market, symbol)
+                    signal = evaluate_signal_engine(mtf)
+                    store_signal_if_changed(market, symbol, signal)
+                    alert_obj = store_alert_if_new(market, symbol, signal)
+                    maybe_send_telegram_alert(market, symbol, alert_obj)
+                except Exception:
+                    pass
+            time.sleep(ALERT_SCAN_SECONDS)
+        except Exception:
+            time.sleep(ALERT_SCAN_SECONDS)
+
+
+def ensure_alert_thread():
+    global ALERT_THREAD_STARTED
+    if ALERT_THREAD_STARTED:
+        return
+    t = threading.Thread(target=alert_scan_loop, daemon=True)
+    t.start()
+    ALERT_THREAD_STARTED = True
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(lang: str = "de", error: str = "", msg: str = ""):
+    ensure_alert_thread()
     error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
 
@@ -1837,6 +2031,7 @@ def admin_delete_user(request: Request, username: str = Form(...), lang: str = F
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, lang: str = "de"):
+    ensure_alert_thread()
     user = require_login(request)
     if not user:
         return RedirectResponse(url=f"/login?lang={lang}", status_code=303)
@@ -1889,6 +2084,7 @@ def home(request: Request, lang: str = "de"):
 
 @app.get("/analyze", response_class=HTMLResponse)
 def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
+    ensure_alert_thread()
     user = require_login(request)
     if not user:
         return RedirectResponse(url=f"/login?lang={lang}", status_code=303)
@@ -1910,7 +2106,10 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         signal = evaluate_signal_engine(mtf)
         changed = store_signal_if_changed(market, symbol, signal)
+        alert_obj = store_alert_if_new(market, symbol, signal)
+        maybe_send_telegram_alert(market, symbol, alert_obj)
         history = get_signal_history(market, symbol, limit=12)
+        alert_history_rows = get_alert_history(limit=20)
 
         chart = draw_chart(mtf["M5"]["candles"], m5, signal, symbol, market)
         img_b64 = to_base64_png(chart)
@@ -1929,6 +2128,8 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         if changed:
             signal_banner += '<div class="banner banner-blue">📌 Neues Signal-Update gespeichert.</div>'
+        if alert_obj:
+            signal_banner += f'<div class="banner banner-success">🔔 ALERT: {alert_obj["alert_type"]} | {alert_obj["severity"].upper()}</div>'
 
         history_rows = ""
         for row in history:
@@ -1949,6 +2150,25 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
             </tr>
             """
 
+
+        alert_table_rows = ""
+        for a in alert_history_rows:
+            alert_table_rows += f"""
+            <tr>
+                <td>{a['created_at'][:19].replace('T', ' ')}</td>
+                <td>{a['market'].upper()}</td>
+                <td>{a['symbol']}</td>
+                <td>{a['alert_type']}</td>
+                <td>{a['severity']}</td>
+                <td>{a['signal_type']}</td>
+                <td>{a['signal_status']}</td>
+                <td>{a['signal_score']:.0f}</td>
+                <td>{format_price(a['entry_price'])}</td>
+                <td>{format_price(a['sl_price'])}</td>
+                <td>{format_price(a['tp1'])}</td>
+                <td>{format_price(a['tp2'])}</td>
+            </tr>
+            """
         body = f"""
         {topbar(lang, user, True, user['role'] == 'admin')}
 
@@ -2050,6 +2270,26 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                 <div class="card" style="background:rgba(255,255,255,0.02); box-shadow:none;">
                     <div class="muted">{signal['explanation']}</div>
                 </div>
+
+
+                <div class="section-title">Alert History</div>
+                <table>
+                    <tr>
+                        <th>Zeit</th>
+                        <th>Market</th>
+                        <th>Symbol</th>
+                        <th>Alert</th>
+                        <th>Severity</th>
+                        <th>Signal</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                        <th>Entry</th>
+                        <th>SL</th>
+                        <th>TP1</th>
+                        <th>TP2</th>
+                    </tr>
+                    {alert_table_rows if alert_table_rows else "<tr><td colspan='12'>Keine Alerts</td></tr>"}
+                </table>
 
                 <div class="section-title">Signal History</div>
                 <table>
