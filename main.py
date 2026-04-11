@@ -573,9 +573,11 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
     if not TWELVE_DATA_API_KEY:
         raise ValueError("Twelve Data API Key fehlt")
 
+    api_symbol = normalize_twelve_symbol(symbol)
+
     url = "https://api.twelvedata.com/time_series"
     params = {
-        "symbol": symbol.upper().strip(),
+        "symbol": api_symbol,
         "interval": interval,
         "outputsize": outputsize,
         "apikey": TWELVE_DATA_API_KEY,
@@ -587,7 +589,7 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
     data = r.json()
 
     if "values" not in data or not data["values"]:
-        raise ValueError(data.get("message", "Forex/Gold-Daten konnten nicht geladen werden"))
+        raise ValueError(data.get("message", f"Forex/Gold-Daten konnten nicht geladen werden: {api_symbol}"))
 
     values = list(reversed(data["values"]))
     candles = []
@@ -599,6 +601,79 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
             "close": float(row["close"]),
         })
     return candles
+
+
+def normalize_twelve_symbol(symbol: str) -> str:
+    raw = symbol.strip().upper().replace(" ", "")
+    mapping = {
+        "EURUSD": "EUR/USD",
+        "GBPUSD": "GBP/USD",
+        "USDJPY": "USD/JPY",
+        "USDCHF": "USD/CHF",
+        "USDCAD": "USD/CAD",
+        "AUDUSD": "AUD/USD",
+        "NZDUSD": "NZD/USD",
+        "XAUUSD": "XAU/USD",
+        "XAGUSD": "XAG/USD",
+        "EUR/USD": "EUR/USD",
+        "GBP/USD": "GBP/USD",
+        "USD/JPY": "USD/JPY",
+        "USD/CHF": "USD/CHF",
+        "USD/CAD": "USD/CAD",
+        "AUD/USD": "AUD/USD",
+        "NZD/USD": "NZD/USD",
+        "XAU/USD": "XAU/USD",
+        "XAG/USD": "XAG/USD",
+    }
+    return mapping.get(raw, raw)
+
+
+def calculate_fibonacci(last_high, last_low):
+    diff = max(last_high - last_low, 1e-9)
+    return {
+        "fib_50": last_high - diff * 0.500,
+        "fib_618": last_high - diff * 0.618,
+        "fib_786": last_high - diff * 0.786,
+    }
+
+
+def detect_order_blocks(candles):
+    bullish_ob = None
+    bearish_ob = None
+    for i in range(2, len(candles) - 2):
+        c0 = candles[i]
+        c1 = candles[i + 1]
+        c2 = candles[i + 2]
+
+        if c0["close"] < c0["open"] and c1["close"] > c1["open"] and c2["close"] > c2["open"] and c2["close"] > c0["high"]:
+            bullish_ob = (c0["low"], c0["high"])
+
+        if c0["close"] > c0["open"] and c1["close"] < c1["open"] and c2["close"] < c2["open"] and c2["close"] < c0["low"]:
+            bearish_ob = (c0["low"], c0["high"])
+    return bullish_ob, bearish_ob
+
+
+def detect_liquidity_sweeps(candles, ref_high, ref_low):
+    if len(candles) < 2:
+        return {"upper_sweep": False, "lower_sweep": False}
+    last = candles[-1]
+    upper_sweep = last["high"] > ref_high and last["close"] < ref_high
+    lower_sweep = last["low"] < ref_low and last["close"] > ref_low
+    return {"upper_sweep": upper_sweep, "lower_sweep": lower_sweep}
+
+
+def get_session_context():
+    from datetime import datetime, timezone
+    hour = datetime.now(timezone.utc).hour
+    if 0 <= hour < 7:
+        return "Asia Session"
+    if 7 <= hour < 12:
+        return "London Open Window"
+    if 12 <= hour < 17:
+        return "London / New York Overlap"
+    if 17 <= hour < 22:
+        return "New York Session"
+    return "Late NY / Rollover"
 
 
 def find_swings(highs, lows, lookback=2):
@@ -686,6 +761,7 @@ def analyze_single_timeframe(candles, label: str):
     swing_highs, swing_lows = find_swings(highs, lows, lookback=2)
     bullish_fvg, bearish_fvg = detect_fvg(candles)
     eq_high, eq_low = detect_equal_highs_lows(highs[-30:], lows[-30:])
+    bullish_ob, bearish_ob = detect_order_blocks(candles)
 
     last_swing_high = swing_highs[-1][1] if swing_highs else recent_high
     last_swing_low = swing_lows[-1][1] if swing_lows else recent_low
@@ -717,6 +793,8 @@ def analyze_single_timeframe(candles, label: str):
     premium_mid = recent_low + (recent_high - recent_low) * 0.5
     discount_zone = recent_low + (recent_high - recent_low) * 0.25
     premium_zone = recent_low + (recent_high - recent_low) * 0.75
+
+    sweeps = detect_liquidity_sweeps(candles, last_swing_high, last_swing_low)
 
     if trend == "BULLISH":
         fvg = bullish_fvg
@@ -751,7 +829,14 @@ def analyze_single_timeframe(candles, label: str):
         "atr": atr,
         "last_swing_high": last_swing_high,
         "last_swing_low": last_swing_low,
+        "bullish_fvg": bullish_fvg,
+        "bearish_fvg": bearish_fvg,
+        "bullish_ob": bullish_ob,
+        "bearish_ob": bearish_ob,
+        "upper_sweep": sweeps["upper_sweep"],
+        "lower_sweep": sweeps["lower_sweep"],
     }
+
 
 
 def extract_last_daily_info(daily_candles):
@@ -841,12 +926,12 @@ def evaluate_signal_engine(mtf):
 
     last_h1_high = h1["recent_high"]
     last_h1_low = h1["recent_low"]
+    fib = calculate_fibonacci(last_h1_high, last_h1_low)
 
     reasons = []
-
     day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
 
-    # zones always visible
+    # Main zones from previous logic remain
     buy_zone_low = min(last_day_low + day_range * 0.10, h1["support"])
     buy_zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
     buy_entry = (buy_zone_low + buy_zone_high) / 2
@@ -855,7 +940,7 @@ def evaluate_signal_engine(mtf):
     sell_zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
     sell_entry = (sell_zone_low + sell_zone_high) / 2
 
-    # fixed user rules
+    # user rules
     buy_sl = last_h1_low
     buy_tp_medium = last_h1_high
     buy_tp_large = last_day_high
@@ -864,65 +949,34 @@ def evaluate_signal_engine(mtf):
     sell_tp_medium = last_h1_low
     sell_tp_large = last_day_low
 
-    buy_risk = buy_entry - buy_sl
-    if buy_risk <= 0:
-        buy_risk = max(m5["atr"] * 1.2, abs(buy_entry) * 0.001)
-
-    sell_risk = sell_sl - sell_entry
-    if sell_risk <= 0:
-        sell_risk = max(m5["atr"] * 1.2, abs(sell_entry) * 0.001)
+    buy_risk = max(buy_entry - buy_sl, m5["atr"] * 1.0, 1e-9)
+    sell_risk = max(sell_sl - sell_entry, m5["atr"] * 1.0, 1e-9)
 
     buy_tp1 = buy_entry + buy_risk * 1.0
     buy_tp2 = buy_entry + buy_risk * 1.5
-
     sell_tp1 = sell_entry - sell_risk * 1.0
     sell_tp2 = sell_entry - sell_risk * 1.5
 
-    # current price relation to zones / past highs lows
-    if buy_zone_low <= current_price <= buy_zone_high:
-        buy_zone_status = "IN BUY ZONE"
-        reasons.append("Preis ist in der Buy Zone.")
-    elif current_price > buy_zone_high:
-        buy_zone_status = "ABOVE BUY ZONE"
-        reasons.append("Preis ist ueber der Buy Zone, Ruecklauf in Buy Zone moeglich.")
-    else:
-        buy_zone_status = "BELOW BUY ZONE"
-        reasons.append("Preis ist unter der Buy Zone, spaetere Reaktion moeglich.")
+    # Smart money confluence
+    buy_fvg = m5["bullish_fvg"] or m15["bullish_fvg"] or h1["bullish_fvg"]
+    sell_fvg = m5["bearish_fvg"] or m15["bearish_fvg"] or h1["bearish_fvg"]
+    buy_ob = h1["bullish_ob"] or m15["bullish_ob"] or m5["bullish_ob"]
+    sell_ob = h1["bearish_ob"] or m15["bearish_ob"] or m5["bearish_ob"]
 
-    if sell_zone_low <= current_price <= sell_zone_high:
-        sell_zone_status = "IN SELL ZONE"
-        reasons.append("Preis ist in der Sell Zone.")
-    elif current_price < sell_zone_low:
-        sell_zone_status = "BELOW SELL ZONE"
-        reasons.append("Preis ist unter der Sell Zone, Ruecklauf in Sell Zone moeglich.")
-    else:
-        sell_zone_status = "ABOVE SELL ZONE"
-        reasons.append("Preis ist ueber der Sell Zone, spaetere Reaktion moeglich.")
+    h1_sweep_sell = h1["upper_sweep"] or d1["upper_sweep"]
+    h1_sweep_buy = h1["lower_sweep"] or d1["lower_sweep"]
+    m5_sweep_sell = m5["upper_sweep"] or m15["upper_sweep"]
+    m5_sweep_buy = m5["lower_sweep"] or m15["lower_sweep"]
 
-    # sweeps / liquidity reactions
-    sweep_below_h1 = current_price < last_h1_low
-    sweep_above_h1 = current_price > last_h1_high
-    sweep_below_day = current_price < last_day_low
-    sweep_above_day = current_price > last_day_high
-
-    if sweep_below_h1 or sweep_below_day:
-        reasons.append("Sweep unter H1/Daily Low -> Buy Reaktion moeglich.")
-    if sweep_above_h1 or sweep_above_day:
-        reasons.append("Sweep ueber H1/Daily High -> Sell Reaktion moeglich.")
-
-    # FVG text / bias helpers
-    bullish_fvg_active = " - " in str(m5["fvg_text"]) and m5["trend"] == "BULLISH"
-    bearish_fvg_active = " - " in str(m5["fvg_text"]) and m5["trend"] == "BEARISH"
-
-    # 5m both directions visible
+    # both 5m sides always visible
     m5_buy_entry = current_price
     m5_buy_sl = last_h1_low
     m5_buy_risk = max(m5_buy_entry - m5_buy_sl, m5["atr"] * 1.2, 1e-9)
     m5_buy_tp1 = m5_buy_entry + m5_buy_risk * 1.0
     m5_buy_tp2 = m5_buy_entry + m5_buy_risk * 1.5
     m5_buy_status = "5M BUY PREPARATION"
-    if buy_zone_low <= current_price <= buy_zone_high:
-        m5_buy_status = "5M BUY ZONE REACTION WATCH"
+    if m5_sweep_buy:
+        m5_buy_status = "5M BUY SWEEP READY"
     if m5["trend"] == "BULLISH" and (m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH"):
         m5_buy_status = "5M BUY ENTRY READY"
 
@@ -932,20 +986,20 @@ def evaluate_signal_engine(mtf):
     m5_sell_tp1 = m5_sell_entry - m5_sell_risk * 1.0
     m5_sell_tp2 = m5_sell_entry - m5_sell_risk * 1.5
     m5_sell_status = "5M SELL PREPARATION"
-    if sell_zone_low <= current_price <= sell_zone_high:
-        m5_sell_status = "5M SELL ZONE REACTION WATCH"
+    if m5_sweep_sell:
+        m5_sell_status = "5M SELL SWEEP READY"
     if m5["trend"] == "BEARISH" and (m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH"):
         m5_sell_status = "5M SELL ENTRY READY"
 
-    # 15m both directions visible
+    # both 15m sides always visible
     m15_buy_entry = current_price
     m15_buy_sl = last_h1_low
     m15_buy_risk = max(m15_buy_entry - m15_buy_sl, m15["atr"] * 1.2, 1e-9)
     m15_buy_tp1 = m15_buy_entry + m15_buy_risk * 1.0
     m15_buy_tp2 = m15_buy_entry + m15_buy_risk * 1.5
     m15_buy_status = "15M BUY PREPARATION"
-    if buy_zone_low <= current_price <= buy_zone_high:
-        m15_buy_status = "15M BUY ZONE REACTION WATCH"
+    if h1_sweep_buy:
+        m15_buy_status = "15M BUY SWEEP READY"
     if m15["trend"] == "BULLISH" and (m15["bos"] == "BULLISH BOS" or m15["choch"] == "BULLISH CHOCH"):
         m15_buy_status = "15M BUY ENTRY READY"
 
@@ -955,24 +1009,28 @@ def evaluate_signal_engine(mtf):
     m15_sell_tp1 = m15_sell_entry - m15_sell_risk * 1.0
     m15_sell_tp2 = m15_sell_entry - m15_sell_risk * 1.5
     m15_sell_status = "15M SELL PREPARATION"
-    if sell_zone_low <= current_price <= sell_zone_high:
-        m15_sell_status = "15M SELL ZONE REACTION WATCH"
+    if h1_sweep_sell:
+        m15_sell_status = "15M SELL SWEEP READY"
     if m15["trend"] == "BEARISH" and (m15["bos"] == "BEARISH BOS" or m15["choch"] == "BEARISH CHOCH"):
         m15_sell_status = "15M SELL ENTRY READY"
 
-    # scores while keeping old D/H1 logic
     buy_score = 0
     sell_score = 0
 
+    # keep daily/h1 checks
     if d1["trend"] == "BULLISH":
         buy_score += 20
+        reasons.append("Last Daily trend bullish.")
     elif d1["trend"] == "BEARISH":
         sell_score += 20
+        reasons.append("Last Daily trend bearish.")
 
     if h1["trend"] == "BULLISH":
         buy_score += 25
+        reasons.append("Last H1 trend bullish.")
     elif h1["trend"] == "BEARISH":
         sell_score += 25
+        reasons.append("Last H1 trend bearish.")
 
     if h4["trend"] == "BULLISH":
         buy_score += 10
@@ -984,45 +1042,53 @@ def evaluate_signal_engine(mtf):
     elif current_price < today_open:
         sell_score += 5
 
-    if current_price <= m5["discount_zone"]:
-        buy_score += 10
-    if current_price >= m5["premium_zone"]:
-        sell_score += 10
-
+    # zone location
     if buy_zone_low <= current_price <= buy_zone_high:
         buy_score += 18
-    elif current_price > buy_zone_high:
-        buy_score += 6
-    else:
-        buy_score += 4
-
+        reasons.append("Preis ist in/nahe Buy Zone.")
     if sell_zone_low <= current_price <= sell_zone_high:
         sell_score += 18
-    elif current_price < sell_zone_low:
-        sell_score += 6
-    else:
-        sell_score += 4
+        reasons.append("Preis ist in/nahe Sell Zone.")
 
-    if sweep_below_h1 or sweep_below_day:
+    # fibonacci confluence
+    if buy_zone_low <= fib["fib_618"] <= buy_zone_high or buy_zone_low <= fib["fib_786"] <= buy_zone_high:
+        buy_score += 10
+        reasons.append("Buy Zone + Fibonacci Confluence.")
+    if sell_zone_low <= fib["fib_50"] <= sell_zone_high or sell_zone_low <= fib["fib_618"] <= sell_zone_high:
+        sell_score += 10
+        reasons.append("Sell Zone + Fibonacci Confluence.")
+
+    # FVG / OB
+    if buy_fvg:
         buy_score += 8
-    if sweep_above_h1 or sweep_above_day:
+        reasons.append("Bullish FVG vorhanden.")
+    if sell_fvg:
         sell_score += 8
-
-    if bullish_fvg_active:
-        buy_score += 5
-        reasons.append("Bullish FVG aktiv.")
-    if bearish_fvg_active:
-        sell_score += 5
-        reasons.append("Bearish FVG aktiv.")
-
-    if "ENTRY READY" in m5_buy_status:
+        reasons.append("Bearish FVG vorhanden.")
+    if buy_ob:
         buy_score += 8
-    if "ENTRY READY" in m5_sell_status:
+        reasons.append("Bullish Order Block vorhanden.")
+    if sell_ob:
         sell_score += 8
-    if "ENTRY READY" in m15_buy_status:
-        buy_score += 6
-    if "ENTRY READY" in m15_sell_status:
-        sell_score += 6
+        reasons.append("Bearish Order Block vorhanden.")
+
+    # sweeps
+    if h1_sweep_buy or m5_sweep_buy:
+        buy_score += 12
+        reasons.append("Liquidity sweep unter Low -> Buy Reaction moeglich.")
+    if h1_sweep_sell or m5_sweep_sell:
+        sell_score += 12
+        reasons.append("Liquidity sweep ueber High -> Sell Reaction moeglich.")
+
+    # entry accuracy from lower TF
+    if "READY" in m5_buy_status:
+        buy_score += 10
+    if "READY" in m5_sell_status:
+        sell_score += 10
+    if "READY" in m15_buy_status:
+        buy_score += 7
+    if "READY" in m15_sell_status:
+        sell_score += 7
 
     if buy_score > sell_score + 8:
         preferred_side = "BUY"
@@ -1031,15 +1097,10 @@ def evaluate_signal_engine(mtf):
     else:
         preferred_side = "RANGE / WAIT"
 
-    # main output but no "NO CLEAR ZONE"
     signal_type = "BOTH ZONES VISIBLE"
-    signal_status = "WAIT - WATCH BUY & SELL ZONES"
-    score = max(buy_score, sell_score)
-
+    signal_status = "WAIT - WATCH BOTH SIDES"
     zone_low = None
     zone_high = None
-    prep_price = None
-    trigger_price = current_price
     entry_price = None
     sl_price = None
     tp1 = None
@@ -1052,19 +1113,17 @@ def evaluate_signal_engine(mtf):
         signal_status = "WATCH BUY ZONE"
         zone_low = buy_zone_low
         zone_high = buy_zone_high
-        prep_price = buy_entry
         entry_price = buy_entry
         sl_price = buy_sl
         tp1 = buy_tp1
         tp2 = buy_tp2
         tp_medium = buy_tp_medium
         tp_large = buy_tp_large
-
         if buy_zone_low <= current_price <= buy_zone_high:
             signal_type = "BUY ZONE ACTIVE"
             signal_status = "WAIT REACTION / CONFIRMATION"
-        if "ENTRY READY" in m5_buy_status:
-            signal_type = "BUY 5M SETUP"
+        if "ENTRY READY" in m5_buy_status or "ENTRY READY" in m15_buy_status:
+            signal_type = "BUY ENTRY READY"
             signal_status = "ENTRY POSSIBLE"
 
     elif preferred_side == "SELL":
@@ -1072,19 +1131,17 @@ def evaluate_signal_engine(mtf):
         signal_status = "WATCH SELL ZONE"
         zone_low = sell_zone_low
         zone_high = sell_zone_high
-        prep_price = sell_entry
         entry_price = sell_entry
         sl_price = sell_sl
         tp1 = sell_tp1
         tp2 = sell_tp2
         tp_medium = sell_tp_medium
         tp_large = sell_tp_large
-
         if sell_zone_low <= current_price <= sell_zone_high:
             signal_type = "SELL ZONE ACTIVE"
             signal_status = "WAIT REACTION / CONFIRMATION"
-        if "ENTRY READY" in m5_sell_status:
-            signal_type = "SELL 5M SETUP"
+        if "ENTRY READY" in m5_sell_status or "ENTRY READY" in m15_sell_status:
+            signal_type = "SELL ENTRY READY"
             signal_status = "ENTRY POSSIBLE"
 
     explanation = " | ".join(reasons)
@@ -1092,11 +1149,11 @@ def evaluate_signal_engine(mtf):
     return {
         "signal_type": signal_type,
         "signal_status": signal_status,
-        "signal_score": score,
+        "signal_score": max(buy_score, sell_score),
         "preferred_side": preferred_side,
 
-        "prep_price": prep_price,
-        "trigger_price": trigger_price,
+        "prep_price": entry_price,
+        "trigger_price": current_price,
         "entry_price": entry_price,
         "sl_price": sl_price,
         "tp1": tp1,
@@ -1114,7 +1171,6 @@ def evaluate_signal_engine(mtf):
         "buy_score": buy_score,
         "buy_zone_low": buy_zone_low,
         "buy_zone_high": buy_zone_high,
-        "buy_zone_status": buy_zone_status,
         "buy_entry": buy_entry,
         "buy_sl": buy_sl,
         "buy_tp1": buy_tp1,
@@ -1125,7 +1181,6 @@ def evaluate_signal_engine(mtf):
         "sell_score": sell_score,
         "sell_zone_low": sell_zone_low,
         "sell_zone_high": sell_zone_high,
-        "sell_zone_status": sell_zone_status,
         "sell_entry": sell_entry,
         "sell_sl": sell_sl,
         "sell_tp1": sell_tp1,
@@ -1133,36 +1188,45 @@ def evaluate_signal_engine(mtf):
         "sell_tp_medium": sell_tp_medium,
         "sell_tp_large": sell_tp_large,
 
+        "fib_50": fib["fib_50"],
+        "fib_618": fib["fib_618"],
+        "fib_786": fib["fib_786"],
+
+        "buy_fvg": f"{format_price(buy_fvg[0])} - {format_price(buy_fvg[1])}" if buy_fvg else "-",
+        "sell_fvg": f"{format_price(sell_fvg[0])} - {format_price(sell_fvg[1])}" if sell_fvg else "-",
+        "buy_ob": f"{format_price(buy_ob[0])} - {format_price(buy_ob[1])}" if buy_ob else "-",
+        "sell_ob": f"{format_price(sell_ob[0])} - {format_price(sell_ob[1])}" if sell_ob else "-",
+        "buy_sweep": "YES" if (h1_sweep_buy or m5_sweep_buy) else "NO",
+        "sell_sweep": "YES" if (h1_sweep_sell or m5_sweep_sell) else "NO",
+
+        "m5_buy_status": m5_buy_status,
         "m5_buy_entry": m5_buy_entry,
         "m5_buy_sl": m5_buy_sl,
         "m5_buy_tp1": m5_buy_tp1,
         "m5_buy_tp2": m5_buy_tp2,
-        "m5_buy_status": m5_buy_status,
+        "m5_sell_status": m5_sell_status,
         "m5_sell_entry": m5_sell_entry,
         "m5_sell_sl": m5_sell_sl,
         "m5_sell_tp1": m5_sell_tp1,
         "m5_sell_tp2": m5_sell_tp2,
-        "m5_sell_status": m5_sell_status,
 
+        "m15_buy_status": m15_buy_status,
         "m15_buy_entry": m15_buy_entry,
         "m15_buy_sl": m15_buy_sl,
         "m15_buy_tp1": m15_buy_tp1,
         "m15_buy_tp2": m15_buy_tp2,
-        "m15_buy_status": m15_buy_status,
+        "m15_sell_status": m15_sell_status,
         "m15_sell_entry": m15_sell_entry,
         "m15_sell_sl": m15_sell_sl,
         "m15_sell_tp1": m15_sell_tp1,
         "m15_sell_tp2": m15_sell_tp2,
-        "m15_sell_status": m15_sell_status,
 
-        "sweep_below_h1": sweep_below_h1,
-        "sweep_above_h1": sweep_above_h1,
-        "sweep_below_day": sweep_below_day,
-        "sweep_above_day": sweep_above_day,
-
+        "session_name": get_session_context(),
+        "news_filter": "Manual check recommended before high-impact news",
         "explanation": explanation,
-        "timeframe_note": "Daily + H1 check main move | 15m + 5m show both-side preparation",
+        "timeframe_note": "D1 + H1 = main direction | 15m + 5m = both-side preparation | Fib + OB + FVG + Sweep = confluence",
     }
+
 
 
 def get_latest_signal(market: str, symbol: str):
@@ -1852,7 +1916,7 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
         elif "SELL ZONE" in sig:
             signal_banner = f'<div class="banner banner-error">🔴 {sig} | Zone: {format_price(signal["zone_low"])} - {format_price(signal["zone_high"])} | Last H1 High SL: {format_price(signal["last_h1_high"])}</div>'
         else:
-            signal_banner = f'<div class="banner banner-blue">📊 BOTH ZONES VISIBLE | Preferred: {signal["preferred_side"]} | Buy Zone: {format_price(signal["buy_zone_low"])} - {format_price(signal["buy_zone_high"])} | Sell Zone: {format_price(signal["sell_zone_low"])} - {format_price(signal["sell_zone_high"])}</div>'
+            signal_banner = f'<div class="banner banner-blue">📊 BOTH ZONES VISIBLE | Preferred: {signal["preferred_side"]} | Buy Zone: {format_price(signal["buy_zone_low"])} - {format_price(signal["buy_zone_high"])} | Sell Zone: {format_price(signal["sell_zone_low"])} - {format_price(signal["sell_zone_high"])} </div>'
 
         if changed:
             signal_banner += '<div class="banner banner-blue">📌 Neues Signal-Update gespeichert.</div>'
@@ -1918,57 +1982,48 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                     <div class="info-item"><div class="info-label">Last H1 Low</div><div class="info-value">{format_price(signal['last_h1_low'])}</div></div>
                 </div>
 
-
-                <div class="section-title">Both Zones / Main Preparation</div>
+                
+                <div class="section-title">Smart Money Confluence</div>
                 <div class="info-list">
                     <div class="info-item"><div class="info-label">Preferred Side</div><div class="info-value">{signal['preferred_side']}</div></div>
-                    <div class="info-item"><div class="info-label">Main Signal</div><div class="info-value">{signal['signal_type']}</div></div>
+                    <div class="info-item"><div class="info-label">Session</div><div class="info-value">{signal['session_name']}</div></div>
+                    <div class="info-item"><div class="info-label">Fib 0.5</div><div class="info-value">{format_price(signal['fib_50'])}</div></div>
+                    <div class="info-item"><div class="info-label">Fib 0.618</div><div class="info-value">{format_price(signal['fib_618'])}</div></div>
+                    <div class="info-item"><div class="info-label">Fib 0.786</div><div class="info-value">{format_price(signal['fib_786'])}</div></div>
+                    <div class="info-item"><div class="info-label">News Filter</div><div class="info-value">{signal['news_filter']}</div></div>
+                    <div class="info-item"><div class="info-label">BUY FVG</div><div class="info-value">{signal['buy_fvg']}</div></div>
+                    <div class="info-item"><div class="info-label">SELL FVG</div><div class="info-value">{signal['sell_fvg']}</div></div>
+                    <div class="info-item"><div class="info-label">BUY Order Block</div><div class="info-value">{signal['buy_ob']}</div></div>
+                    <div class="info-item"><div class="info-label">SELL Order Block</div><div class="info-value">{signal['sell_ob']}</div></div>
+                    <div class="info-item"><div class="info-label">BUY Sweep</div><div class="info-value">{signal['buy_sweep']}</div></div>
+                    <div class="info-item"><div class="info-label">SELL Sweep</div><div class="info-value">{signal['sell_sweep']}</div></div>
+                </div>
 
+                <div class="section-title">Both Sides Entry Preparation</div>
+                <div class="info-list">
                     <div class="info-item"><div class="info-label">BUY Zone</div><div class="info-value">{format_price(signal['buy_zone_low'])} - {format_price(signal['buy_zone_high'])}</div></div>
                     <div class="info-item"><div class="info-label">SELL Zone</div><div class="info-value">{format_price(signal['sell_zone_low'])} - {format_price(signal['sell_zone_high'])}</div></div>
-
-                    <div class="info-item"><div class="info-label">BUY Zone Status</div><div class="info-value">{signal['buy_zone_status']}</div></div>
-                    <div class="info-item"><div class="info-label">SELL Zone Status</div><div class="info-value">{signal['sell_zone_status']}</div></div>
-
-                    <div class="info-item"><div class="info-label">BUY Entry Prep</div><div class="info-value">{format_price(signal['buy_entry'])}</div></div>
-                    <div class="info-item"><div class="info-label">SELL Entry Prep</div><div class="info-value">{format_price(signal['sell_entry'])}</div></div>
-
-                    <div class="info-item"><div class="info-label">BUY SL</div><div class="info-value">{format_price(signal['buy_sl'])}</div></div>
-                    <div class="info-item"><div class="info-label">SELL SL</div><div class="info-value">{format_price(signal['sell_sl'])}</div></div>
-
-                    <div class="info-item"><div class="info-label">BUY TP Medium / Large</div><div class="info-value">{format_price(signal['buy_tp_medium'])} / {format_price(signal['buy_tp_large'])}</div></div>
-                    <div class="info-item"><div class="info-label">SELL TP Medium / Large</div><div class="info-value">{format_price(signal['sell_tp_medium'])} / {format_price(signal['sell_tp_large'])}</div></div>
+                    <div class="info-item"><div class="info-label">BUY Entry / SL</div><div class="info-value">{format_price(signal['buy_entry'])} / {format_price(signal['buy_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">SELL Entry / SL</div><div class="info-value">{format_price(signal['sell_entry'])} / {format_price(signal['sell_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">BUY TP1 / TP2</div><div class="info-value">{format_price(signal['buy_tp1'])} / {format_price(signal['buy_tp2'])}</div></div>
+                    <div class="info-item"><div class="info-label">SELL TP1 / TP2</div><div class="info-value">{format_price(signal['sell_tp1'])} / {format_price(signal['sell_tp2'])}</div></div>
+                    <div class="info-item"><div class="info-label">BUY TP M / L</div><div class="info-value">{format_price(signal['buy_tp_medium'])} / {format_price(signal['buy_tp_large'])}</div></div>
+                    <div class="info-item"><div class="info-label">SELL TP M / L</div><div class="info-value">{format_price(signal['sell_tp_medium'])} / {format_price(signal['sell_tp_large'])}</div></div>
                 </div>
 
-                <div class="section-title">5m Both Directions</div>
+                <div class="section-title">5m / 15m Both Sides</div>
                 <div class="info-list">
-                    <div class="info-item"><div class="info-label">5m Buy Status</div><div class="info-value">{signal['m5_buy_status']}</div></div>
-                    <div class="info-item"><div class="info-label">5m Sell Status</div><div class="info-value">{signal['m5_sell_status']}</div></div>
-                    <div class="info-item"><div class="info-label">5m Buy Entry</div><div class="info-value">{format_price(signal['m5_buy_entry'])}</div></div>
-                    <div class="info-item"><div class="info-label">5m Sell Entry</div><div class="info-value">{format_price(signal['m5_sell_entry'])}</div></div>
-                    <div class="info-item"><div class="info-label">5m Buy SL / TP1 / TP2</div><div class="info-value">{format_price(signal['m5_buy_sl'])} / {format_price(signal['m5_buy_tp1'])} / {format_price(signal['m5_buy_tp2'])}</div></div>
-                    <div class="info-item"><div class="info-label">5m Sell SL / TP1 / TP2</div><div class="info-value">{format_price(signal['m5_sell_sl'])} / {format_price(signal['m5_sell_tp1'])} / {format_price(signal['m5_sell_tp2'])}</div></div>
+                    <div class="info-item"><div class="info-label">5M BUY</div><div class="info-value">{signal['m5_buy_status']}</div></div>
+                    <div class="info-item"><div class="info-label">5M SELL</div><div class="info-value">{signal['m5_sell_status']}</div></div>
+                    <div class="info-item"><div class="info-label">5M BUY Entry/SL</div><div class="info-value">{format_price(signal['m5_buy_entry'])} / {format_price(signal['m5_buy_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">5M SELL Entry/SL</div><div class="info-value">{format_price(signal['m5_sell_entry'])} / {format_price(signal['m5_sell_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">15M BUY</div><div class="info-value">{signal['m15_buy_status']}</div></div>
+                    <div class="info-item"><div class="info-label">15M SELL</div><div class="info-value">{signal['m15_sell_status']}</div></div>
+                    <div class="info-item"><div class="info-label">15M BUY Entry/SL</div><div class="info-value">{format_price(signal['m15_buy_entry'])} / {format_price(signal['m15_buy_sl'])}</div></div>
+                    <div class="info-item"><div class="info-label">15M SELL Entry/SL</div><div class="info-value">{format_price(signal['m15_sell_entry'])} / {format_price(signal['m15_sell_sl'])}</div></div>
                 </div>
 
-                <div class="section-title">15m Both Directions</div>
-                <div class="info-list">
-                    <div class="info-item"><div class="info-label">15m Buy Status</div><div class="info-value">{signal['m15_buy_status']}</div></div>
-                    <div class="info-item"><div class="info-label">15m Sell Status</div><div class="info-value">{signal['m15_sell_status']}</div></div>
-                    <div class="info-item"><div class="info-label">15m Buy Entry</div><div class="info-value">{format_price(signal['m15_buy_entry'])}</div></div>
-                    <div class="info-item"><div class="info-label">15m Sell Entry</div><div class="info-value">{format_price(signal['m15_sell_entry'])}</div></div>
-                    <div class="info-item"><div class="info-label">15m Buy SL / TP1 / TP2</div><div class="info-value">{format_price(signal['m15_buy_sl'])} / {format_price(signal['m15_buy_tp1'])} / {format_price(signal['m15_buy_tp2'])}</div></div>
-                    <div class="info-item"><div class="info-label">15m Sell SL / TP1 / TP2</div><div class="info-value">{format_price(signal['m15_sell_sl'])} / {format_price(signal['m15_sell_tp1'])} / {format_price(signal['m15_sell_tp2'])}</div></div>
-                </div>
-
-                <div class="section-title">Sweep / Reaction Check</div>
-                <div class="info-list">
-                    <div class="info-item"><div class="info-label">Sweep Below H1</div><div class="info-value">{signal['sweep_below_h1']}</div></div>
-                    <div class="info-item"><div class="info-label">Sweep Above H1</div><div class="info-value">{signal['sweep_above_h1']}</div></div>
-                    <div class="info-item"><div class="info-label">Sweep Below Daily</div><div class="info-value">{signal['sweep_below_day']}</div></div>
-                    <div class="info-item"><div class="info-label">Sweep Above Daily</div><div class="info-value">{signal['sweep_above_day']}</div></div>
-                </div>
-
-                <div class="section-title">Signal Erklaerung</div>
+<div class="section-title">Signal Erklaerung</div>
                 <div class="card" style="background:rgba(255,255,255,0.02); box-shadow:none;">
                     <div class="muted">{signal['explanation']}</div>
                 </div>
