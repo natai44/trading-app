@@ -15,19 +15,6 @@ app = FastAPI(title="Trading Mentor App Final")
 DB_PATH = "app.db"
 TWELVE_DATA_API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
 
-TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
-TELEGRAM_CHAT_ID = "1080439188"
-
-ALERT_SYMBOLS = [
-    ("crypto", "BTCUSDT"),
-    ("forex", "XAU/USD"),
-]
-
-LAST_TELEGRAM_ALERTS = {}
-TELEGRAM_ALERT_COOLDOWN = 900  # 15 minutes
-ALERT_SCAN_SECONDS = 90
-ALERT_THREAD_STARTED = False
-
 DEFAULT_ADMIN_USERNAME = "abdinata"
 DEFAULT_ADMIN_PASSWORD = "Nhatty1996#"
 DEFAULT_ADMIN_EMAIL = "abdisanatai@gmail.com"
@@ -1484,118 +1471,8 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
 
 
-
-def safe_float(value):
-    try:
-        return float(value)
-    except:
-        return None
-
-
-def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
-    except Exception:
-        pass
-
-
-def build_alert_message(market: str, symbol: str, signal: dict):
-    signal_type = signal.get("signal_type", "")
-    preferred = signal.get("preferred_side", "-")
-    entry = format_price(signal.get("entry_price"))
-    sl = format_price(signal.get("sl_price"))
-    tp1 = format_price(signal.get("tp1"))
-    tp2 = format_price(signal.get("tp2"))
-    tp_medium = format_price(signal.get("tp_medium"))
-    tp_large = format_price(signal.get("tp_large"))
-    buy_zone = f"{format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}"
-    sell_zone = f"{format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}"
-    score = signal.get("signal_score", 0)
-
-    if signal_type in ["BUY ENTRY READY", "BUY 5M SETUP"]:
-        emoji = "🚀"
-    elif signal_type in ["SELL ENTRY READY", "SELL 5M SETUP"]:
-        emoji = "🔥"
-    elif signal_type in ["BUY ZONE ACTIVE", "SELL ZONE ACTIVE"]:
-        emoji = "⚠️"
-    else:
-        emoji = "📊"
-
-    return (
-        f"{emoji} {signal_type}\n"
-        f"Market: {market.upper()} | Symbol: {symbol}\n"
-        f"Preferred: {preferred} | Score: {score}\n"
-        f"Buy Zone: {buy_zone}\n"
-        f"Sell Zone: {sell_zone}\n"
-        f"Entry: {entry}\n"
-        f"SL: {sl}\n"
-        f"TP1 / TP2: {tp1} / {tp2}\n"
-        f"TP M / L: {tp_medium} / {tp_large}"
-    )
-
-
-def strong_alert_type(signal: dict):
-    signal_type = signal.get("signal_type", "")
-    score = safe_float(signal.get("signal_score")) or 0
-
-    if signal_type in ["BUY ENTRY READY", "BUY 5M SETUP"] and score >= 55:
-        return "BUY_ENTRY_READY"
-    if signal_type in ["SELL ENTRY READY", "SELL 5M SETUP"] and score >= 55:
-        return "SELL_ENTRY_READY"
-    if signal_type == "BUY ZONE ACTIVE" and score >= 45:
-        return "BUY_ZONE_ACTIVE"
-    if signal_type == "SELL ZONE ACTIVE" and score >= 45:
-        return "SELL_ZONE_ACTIVE"
-    return None
-
-
-def maybe_send_telegram_alert(market: str, symbol: str, signal: dict):
-    alert_type = strong_alert_type(signal)
-    if not alert_type:
-        return
-
-    key = f"{market}:{symbol}:{alert_type}"
-    now = time.time()
-    last_sent = LAST_TELEGRAM_ALERTS.get(key, 0)
-
-    if now - last_sent < TELEGRAM_ALERT_COOLDOWN:
-        return
-
-    message = build_alert_message(market, symbol, signal)
-    send_telegram_message(message)
-    LAST_TELEGRAM_ALERTS[key] = now
-
-
-def alert_scan_loop():
-    while True:
-        try:
-            for market, symbol in ALERT_SYMBOLS:
-                try:
-                    mtf = get_multi_timeframe_analysis(market, symbol)
-                    signal = evaluate_signal_engine(mtf)
-                    store_signal_if_changed(market, symbol, signal)
-                    maybe_send_telegram_alert(market, symbol, signal)
-                except Exception:
-                    pass
-            time.sleep(ALERT_SCAN_SECONDS)
-        except Exception:
-            time.sleep(ALERT_SCAN_SECONDS)
-
-
-def ensure_alert_thread():
-    global ALERT_THREAD_STARTED
-    if ALERT_THREAD_STARTED:
-        return
-    t = threading.Thread(target=alert_scan_loop, daemon=True)
-    t.start()
-    ALERT_THREAD_STARTED = True
-
 @app.get("/login", response_class=HTMLResponse)
 def login_page(lang: str = "de", error: str = "", msg: str = ""):
-    ensure_alert_thread()
     error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
 
@@ -1661,7 +1538,6 @@ def logout(lang: str = "de", request: Request = None):
 @app.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, lang: str = "de", msg: str = ""):
     user = require_login(request)
-    ensure_alert_thread()
     if not user:
         return RedirectResponse(url=f"/login?lang={lang}", status_code=303)
 
@@ -2034,8 +1910,6 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         signal = evaluate_signal_engine(mtf)
         changed = store_signal_if_changed(market, symbol, signal)
-        if market in ["crypto", "forex"] and symbol.strip().upper() in ["BTCUSDT", "XAU/USD", "XAUUSD"]:
-            maybe_send_telegram_alert(market, symbol, signal)
         history = get_signal_history(market, symbol, limit=12)
 
         chart = draw_chart(mtf["M5"]["candles"], m5, signal, symbol, market)
