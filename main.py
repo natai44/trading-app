@@ -386,6 +386,27 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            alert_title TEXT NOT NULL,
+            alert_message TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            signal_status TEXT NOT NULL,
+            signal_score REAL NOT NULL,
+            entry_price REAL,
+            sl_price REAL,
+            tp1 REAL,
+            tp2 REAL,
+            tp_medium REAL,
+            tp_large REAL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     cur.execute("SELECT * FROM users WHERE username = ?", (DEFAULT_ADMIN_USERNAME,))
     if not cur.fetchone():
         cur.execute("""
@@ -1310,6 +1331,121 @@ def get_signal_history(market: str, symbol: str, limit: int = 12):
 
 
 
+
+
+def build_in_app_alert(market: str, symbol: str, signal):
+    signal_type = signal.get("signal_type", "")
+    signal_status = signal.get("signal_status", "")
+    score = float(signal.get("signal_score", 0) or 0)
+
+    if "ENTRY READY" in signal_type or signal_status == "ENTRY POSSIBLE":
+        if "BUY" in signal_type or signal.get("preferred_side") == "BUY":
+            return {
+                "title": "🚀 BUY SETUP READY",
+                "message": f"{symbol.upper()} | Entry: {format_price(signal.get('entry_price'))} | SL: {format_price(signal.get('sl_price'))} | TP1: {format_price(signal.get('tp1'))}",
+                "severity": "success",
+            }
+        if "SELL" in signal_type or signal.get("preferred_side") == "SELL":
+            return {
+                "title": "🔥 SELL SETUP READY",
+                "message": f"{symbol.upper()} | Entry: {format_price(signal.get('entry_price'))} | SL: {format_price(signal.get('sl_price'))} | TP1: {format_price(signal.get('tp1'))}",
+                "severity": "error",
+            }
+
+    if "BUY ZONE ACTIVE" in signal_type:
+        return {
+            "title": "⚠️ BUY ZONE ACTIVE",
+            "message": f"{symbol.upper()} | Buy Zone: {format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}",
+            "severity": "success",
+        }
+
+    if "SELL ZONE ACTIVE" in signal_type:
+        return {
+            "title": "⚠️ SELL ZONE ACTIVE",
+            "message": f"{symbol.upper()} | Sell Zone: {format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}",
+            "severity": "error",
+        }
+
+    if score >= 65:
+        return {
+            "title": "📊 STRONG SIGNAL DETECTED",
+            "message": f"{symbol.upper()} | Preferred: {signal.get('preferred_side')} | Score: {score:.0f}",
+            "severity": "blue",
+        }
+
+    return {
+        "title": "🧭 MARKET PREPARATION",
+        "message": f"{symbol.upper()} | Both zones visible | Preferred: {signal.get('preferred_side')}",
+        "severity": "warning",
+    }
+
+
+def store_alert_if_needed(market: str, symbol: str, signal):
+    alert = build_in_app_alert(market, symbol, signal)
+
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM alert_history
+        WHERE market = ? AND symbol = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (market, symbol))
+    latest = cur.fetchone()
+
+    changed = True
+    if latest:
+        same_title = latest["alert_title"] == alert["title"]
+        same_signal_type = latest["signal_type"] == signal["signal_type"]
+        same_signal_status = latest["signal_status"] == signal["signal_status"]
+        small_score_diff = abs(float(latest["signal_score"]) - float(signal["signal_score"])) < 5
+        if same_title and same_signal_type and same_signal_status and small_score_diff:
+            changed = False
+
+    if changed:
+        cur.execute("""
+            INSERT INTO alert_history (
+                market, symbol, alert_title, alert_message, severity,
+                signal_type, signal_status, signal_score,
+                entry_price, sl_price, tp1, tp2, tp_medium, tp_large, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            market,
+            symbol,
+            alert["title"],
+            alert["message"],
+            alert["severity"],
+            signal.get("signal_type"),
+            signal.get("signal_status"),
+            signal.get("signal_score"),
+            signal.get("entry_price"),
+            signal.get("sl_price"),
+            signal.get("tp1"),
+            signal.get("tp2"),
+            signal.get("tp_medium"),
+            signal.get("tp_large"),
+            now_iso(),
+        ))
+        conn.commit()
+
+    conn.close()
+    return alert, changed
+
+
+def get_alert_history(market: str, symbol: str, limit: int = 12):
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM alert_history
+        WHERE market = ? AND symbol = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (market, symbol, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def draw_chart(candles, analysis, signal, symbol: str, market: str):
     width = 1420
     height = 1030
@@ -1910,7 +2046,9 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         signal = evaluate_signal_engine(mtf)
         changed = store_signal_if_changed(market, symbol, signal)
+        current_alert, alert_changed = store_alert_if_needed(market, symbol, signal)
         history = get_signal_history(market, symbol, limit=12)
+        alert_history = get_alert_history(market, symbol, limit=12)
 
         chart = draw_chart(mtf["M5"]["candles"], m5, signal, symbol, market)
         img_b64 = to_base64_png(chart)
@@ -1929,6 +2067,14 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         if changed:
             signal_banner += '<div class="banner banner-blue">📌 Neues Signal-Update gespeichert.</div>'
+        if alert_changed:
+            severity_class = {
+                "success": "banner-success",
+                "error": "banner-error",
+                "warning": "banner-warning",
+                "blue": "banner-blue",
+            }.get(current_alert["severity"], "banner-blue")
+            signal_banner += f'<div class="banner {severity_class}">{current_alert["title"]} | {current_alert["message"]}</div>'
 
         history_rows = ""
         for row in history:
@@ -1946,6 +2092,23 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                 <td>{format_price(row['tp2'])}</td>
                 <td>{format_price(row['tp_medium'])}</td>
                 <td>{format_price(row['tp_large'])}</td>
+            </tr>
+            """
+
+        alert_rows = ""
+        for row in alert_history:
+            alert_rows += f"""
+            <tr>
+                <td>{row['created_at'][:19].replace('T', ' ')}</td>
+                <td>{row['alert_title']}</td>
+                <td>{row['severity']}</td>
+                <td>{row['signal_type']}</td>
+                <td>{row['signal_status']}</td>
+                <td>{row['signal_score']:.0f}</td>
+                <td>{format_price(row['entry_price'])}</td>
+                <td>{format_price(row['sl_price'])}</td>
+                <td>{format_price(row['tp1'])}</td>
+                <td>{format_price(row['tp2'])}</td>
             </tr>
             """
 
@@ -2068,6 +2231,23 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                         <th>TP L</th>
                     </tr>
                     {history_rows if history_rows else "<tr><td colspan='12'>Keine History</td></tr>"}
+                </table>
+
+                <div class="section-title">Alert History</div>
+                <table>
+                    <tr>
+                        <th>Zeit</th>
+                        <th>Alert</th>
+                        <th>Severity</th>
+                        <th>Signal</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                        <th>Entry</th>
+                        <th>SL</th>
+                        <th>TP1</th>
+                        <th>TP2</th>
+                    </tr>
+                    {alert_rows if alert_rows else "<tr><td colspan='10'>Keine Alerts</td></tr>"}
                 </table>
             </div>
 
