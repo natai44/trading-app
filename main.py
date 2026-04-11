@@ -9,11 +9,77 @@ import uuid
 import sqlite3
 import secrets
 from datetime import datetime
+import time
 
 app = FastAPI(title="Trading Mentor App Final")
 
 DB_PATH = "app.db"
 TWELVE_DATA_API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
+
+API_CACHE = {}
+
+CACHE_TTL_SECONDS = {
+    "crypto": {
+        "5m": 20,
+        "15m": 30,
+        "1h": 120,
+        "4h": 300,
+        "1d": 600,
+    },
+    "forex": {
+        "1min": 30,
+        "5min": 60,
+        "15min": 120,
+        "1h": 300,
+        "4h": 900,
+        "1day": 1800,
+    }
+}
+
+
+def normalize_forex_symbol(symbol: str) -> str:
+    raw = symbol.strip().upper()
+    symbol_map = {
+        "EURUSD": "EUR/USD",
+        "GBPUSD": "GBP/USD",
+        "USDJPY": "USD/JPY",
+        "USDCHF": "USD/CHF",
+        "AUDUSD": "AUD/USD",
+        "NZDUSD": "NZD/USD",
+        "USDCAD": "USD/CAD",
+        "XAUUSD": "XAU/USD",
+        "XAGUSD": "XAG/USD",
+        "EUR/USD": "EUR/USD",
+        "GBP/USD": "GBP/USD",
+        "USD/JPY": "USD/JPY",
+        "USD/CHF": "USD/CHF",
+        "AUD/USD": "AUD/USD",
+        "NZD/USD": "NZD/USD",
+        "USD/CAD": "USD/CAD",
+        "XAU/USD": "XAU/USD",
+        "XAG/USD": "XAG/USD",
+    }
+    return symbol_map.get(raw, raw)
+
+
+def get_cache_ttl(market: str, interval: str) -> int:
+    return CACHE_TTL_SECONDS.get(market, {}).get(interval, 60)
+
+
+def get_cached_value(cache_key: tuple):
+    row = API_CACHE.get(cache_key)
+    if not row:
+        return None
+    expires_at, value = row
+    if time.time() < expires_at:
+        return value
+    API_CACHE.pop(cache_key, None)
+    return None
+
+
+def set_cached_value(cache_key: tuple, value, ttl_seconds: int):
+    API_CACHE[cache_key] = (time.time() + ttl_seconds, value)
+    return value
 
 DEFAULT_ADMIN_USERNAME = "abdinata"
 DEFAULT_ADMIN_PASSWORD = "Nhatty1996#"
@@ -549,8 +615,14 @@ def topbar(lang: str, user=None, show_profile=True, show_admin=False):
 
 
 def get_crypto_candles(symbol: str = "BTCUSDT", interval: str = "5m", limit: int = 200):
+    symbol = symbol.upper().strip()
+    cache_key = ("crypto", symbol, interval, limit)
+    cached = get_cached_value(cache_key)
+    if cached is not None:
+        return cached
+
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol.upper().strip(), "interval": interval, "limit": limit}
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
     r = requests.get(url, params=params, timeout=8)
     r.raise_for_status()
     data = r.json()
@@ -566,16 +638,22 @@ def get_crypto_candles(symbol: str = "BTCUSDT", interval: str = "5m", limit: int
             "low": float(row[3]),
             "close": float(row[4]),
         })
-    return candles
 
+    return set_cached_value(cache_key, candles, get_cache_ttl("crypto", interval))
 
 def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", outputsize: int = 200):
     if not TWELVE_DATA_API_KEY:
         raise ValueError("Twelve Data API Key fehlt")
 
+    api_symbol = normalize_forex_symbol(symbol)
+    cache_key = ("forex", api_symbol, interval, outputsize)
+    cached = get_cached_value(cache_key)
+    if cached is not None:
+        return cached
+
     url = "https://api.twelvedata.com/time_series"
     params = {
-        "symbol": symbol.upper().strip(),
+        "symbol": api_symbol,
         "interval": interval,
         "outputsize": outputsize,
         "apikey": TWELVE_DATA_API_KEY,
@@ -587,7 +665,7 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
     data = r.json()
 
     if "values" not in data or not data["values"]:
-        raise ValueError(data.get("message", "Forex/Gold-Daten konnten nicht geladen werden"))
+        raise ValueError(data.get("message", f"Forex/Gold-Daten konnten nicht geladen werden: {api_symbol}"))
 
     values = list(reversed(data["values"]))
     candles = []
@@ -598,8 +676,8 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
             "low": float(row["low"]),
             "close": float(row["close"]),
         })
-    return candles
 
+    return set_cached_value(cache_key, candles, get_cache_ttl("forex", interval))
 
 def find_swings(highs, lows, lookback=2):
     swing_highs = []
@@ -775,6 +853,15 @@ def extract_last_daily_info(daily_candles):
 
 
 def get_multi_timeframe_analysis(market: str, symbol: str):
+    normalized_symbol = symbol.strip()
+    if market == "forex":
+        normalized_symbol = normalize_forex_symbol(normalized_symbol)
+
+    mtf_cache_key = ("multi", market, normalized_symbol)
+    mtf_cached = get_cached_value(mtf_cache_key)
+    if mtf_cached is not None:
+        return mtf_cached
+
     if market == "crypto":
         tf_map = {
             "M5": "5m",
@@ -784,7 +871,8 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
             "D1": "1d",
         }
         fetcher = get_crypto_candles
-        fetch_kwargs = {"symbol": symbol, "limit": 200}
+        fetch_kwargs = {"symbol": normalized_symbol, "limit": 200}
+        mtf_ttl = 20
     else:
         tf_map = {
             "M5": "5min",
@@ -794,7 +882,8 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
             "D1": "1day",
         }
         fetcher = get_forex_or_gold_candles
-        fetch_kwargs = {"symbol": symbol, "outputsize": 200}
+        fetch_kwargs = {"symbol": normalized_symbol, "outputsize": 200}
+        mtf_ttl = 60
 
     result = {}
     for name, tf in tf_map.items():
@@ -806,8 +895,7 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
         }
 
     result["daily_info"] = extract_last_daily_info(result["D1"]["candles"])
-    return result
-
+    return set_cached_value(mtf_cache_key, result, mtf_ttl)
 
 def combine_bias(mtf):
     trends = [
@@ -828,7 +916,6 @@ def combine_bias(mtf):
 
 def evaluate_signal_engine(mtf):
     m5 = mtf["M5"]["analysis"]
-    m15 = mtf["M15"]["analysis"]
     h1 = mtf["H1"]["analysis"]
     h4 = mtf["H4"]["analysis"]
     d1 = mtf["D1"]["analysis"]
@@ -842,222 +929,177 @@ def evaluate_signal_engine(mtf):
     last_h1_high = h1["recent_high"]
     last_h1_low = h1["recent_low"]
 
-    day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
-
-    # Always visible zones
-    buy_zone_low = min(last_day_low + day_range * 0.10, h1["support"])
-    buy_zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
-    buy_entry = (buy_zone_low + buy_zone_high) / 2
-
-    sell_zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
-    sell_zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
-    sell_entry = (sell_zone_low + sell_zone_high) / 2
-
-    # Your rules
-    buy_sl = last_h1_low
-    buy_tp_medium = last_h1_high
-    buy_tp_large = last_day_high
-
-    sell_sl = last_h1_high
-    sell_tp_medium = last_h1_low
-    sell_tp_large = last_day_low
-
-    buy_risk = buy_entry - buy_sl
-    if buy_risk <= 0:
-        buy_risk = max(m5["atr"] * 1.2, abs(buy_entry) * 0.001)
-
-    sell_risk = sell_sl - sell_entry
-    if sell_risk <= 0:
-        sell_risk = max(m5["atr"] * 1.2, abs(sell_entry) * 0.001)
-
-    buy_tp1 = buy_entry + buy_risk * 1.0
-    buy_tp2 = buy_entry + buy_risk * 1.5
-
-    sell_tp1 = sell_entry - sell_risk * 1.0
-    sell_tp2 = sell_entry - sell_risk * 1.5
-
-    # 5m prep
-    m5_possible_side = "WAIT"
-    m5_status = "NO 5M MOVE"
-    m5_entry = current_price
-    m5_sl = None
-    m5_tp1 = None
-    m5_tp2 = None
-
-    if m5["trend"] == "BULLISH":
-        m5_possible_side = "BUY"
-        m5_sl = last_h1_low
-        rr = max(m5_entry - m5_sl, m5["atr"] * 1.2, 1e-9)
-        m5_tp1 = m5_entry + rr * 1.0
-        m5_tp2 = m5_entry + rr * 1.5
-        m5_status = "5M BUY PREPARATION"
-        if m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH":
-            m5_status = "5M BUY ENTRY READY"
-
-    elif m5["trend"] == "BEARISH":
-        m5_possible_side = "SELL"
-        m5_sl = last_h1_high
-        rr = max(m5_sl - m5_entry, m5["atr"] * 1.2, 1e-9)
-        m5_tp1 = m5_entry - rr * 1.0
-        m5_tp2 = m5_entry - rr * 1.5
-        m5_status = "5M SELL PREPARATION"
-        if m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH":
-            m5_status = "5M SELL ENTRY READY"
-
-    # 15m prep
-    m15_possible_side = "WAIT"
-    m15_status = "NO 15M MOVE"
-    m15_entry = current_price
-    m15_sl = None
-    m15_tp1 = None
-    m15_tp2 = None
-
-    if m15["trend"] == "BULLISH":
-        m15_possible_side = "BUY"
-        m15_sl = last_h1_low
-        rr = max(m15_entry - m15_sl, m15["atr"] * 1.2, 1e-9)
-        m15_tp1 = m15_entry + rr * 1.0
-        m15_tp2 = m15_entry + rr * 1.5
-        m15_status = "15M BUY PREPARATION"
-        if m15["bos"] == "BULLISH BOS" or m15["choch"] == "BULLISH CHOCH":
-            m15_status = "15M BUY ENTRY READY"
-
-    elif m15["trend"] == "BEARISH":
-        m15_possible_side = "SELL"
-        m15_sl = last_h1_high
-        rr = max(m15_sl - m15_entry, m15["atr"] * 1.2, 1e-9)
-        m15_tp1 = m15_entry - rr * 1.0
-        m15_tp2 = m15_entry - rr * 1.5
-        m15_status = "15M SELL PREPARATION"
-        if m15["bos"] == "BEARISH BOS" or m15["choch"] == "BEARISH CHOCH":
-            m15_status = "15M SELL ENTRY READY"
-
-    # Scores
-    buy_score = 0
-    sell_score = 0
     reasons = []
+    score = 0
 
-    if d1["trend"] == "BULLISH":
-        buy_score += 20
-    elif d1["trend"] == "BEARISH":
-        sell_score += 20
+    bullish_bias = d1["trend"] == "BULLISH" and h1["trend"] == "BULLISH"
+    bearish_bias = d1["trend"] == "BEARISH" and h1["trend"] == "BEARISH"
 
-    if h1["trend"] == "BULLISH":
-        buy_score += 25
-    elif h1["trend"] == "BEARISH":
-        sell_score += 25
+    signal_type = "NO CLEAR ZONE"
+    signal_status = "NO TRADE"
 
-    if h4["trend"] == "BULLISH":
-        buy_score += 10
-    elif h4["trend"] == "BEARISH":
-        sell_score += 10
-
-    if current_price > today_open:
-        buy_score += 5
-    elif current_price < today_open:
-        sell_score += 5
-
-    if current_price <= m5["discount_zone"]:
-        buy_score += 10
-    if current_price >= m5["premium_zone"]:
-        sell_score += 10
-
-    if buy_zone_low <= current_price <= buy_zone_high:
-        buy_score += 18
-        reasons.append("Preis in Buy Zone.")
-    elif current_price > buy_zone_high:
-        buy_score += 6
-    else:
-        buy_score += 4
-
-    if sell_zone_low <= current_price <= sell_zone_high:
-        sell_score += 18
-        reasons.append("Preis in Sell Zone.")
-    elif current_price < sell_zone_low:
-        sell_score += 6
-    else:
-        sell_score += 4
-
-    if m5_possible_side == "BUY":
-        buy_score += 5
-    elif m5_possible_side == "SELL":
-        sell_score += 5
-
-    if m15_possible_side == "BUY":
-        buy_score += 8
-    elif m15_possible_side == "SELL":
-        sell_score += 8
-
-    if buy_score > sell_score + 8:
-        preferred_side = "BUY"
-    elif sell_score > buy_score + 8:
-        preferred_side = "SELL"
-    else:
-        preferred_side = "RANGE / WAIT"
-
-    # Never return NO CLEAR ZONE anymore
-    signal_type = "BOTH ZONES VISIBLE"
-    signal_status = "WAIT - WATCH BUY & SELL ZONES"
-
+    zone_low = None
+    zone_high = None
+    prep_price = None
+    trigger_price = None
     entry_price = None
     sl_price = None
     tp1 = None
     tp2 = None
     tp_medium = None
     tp_large = None
-    zone_low = None
-    zone_high = None
 
-    if preferred_side == "BUY":
-        signal_type = "BUY SIDE PREPARATION"
-        signal_status = "WATCH BUY ZONE"
-        zone_low = buy_zone_low
-        zone_high = buy_zone_high
-        entry_price = buy_entry
-        sl_price = buy_sl
-        tp1 = buy_tp1
-        tp2 = buy_tp2
-        tp_medium = buy_tp_medium
-        tp_large = buy_tp_large
+    if bullish_bias:
+        score += 35
+        reasons.append("Last D und H1 sind bullish.")
 
-        if buy_zone_low <= current_price <= buy_zone_high:
+        day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
+
+        zone_low = min(last_day_low + day_range * 0.10, h1["support"])
+        zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
+
+        prep_price = (zone_low + zone_high) / 2
+        sl_price = last_h1_low
+        reasons.append("SL fuer Buy = letztes 1H Low.")
+
+        if current_price >= zone_low and current_price <= zone_high:
+            score += 18
             signal_type = "BUY ZONE ACTIVE"
-            signal_status = "WAIT REACTION / CONFIRMATION"
+            signal_status = "WATCH BUY"
+            reasons.append("Preis ist in der Buy Zone.")
+        elif current_price > zone_high:
+            score += 10
+            signal_type = "BUY ZONE WATCH"
+            signal_status = "WAIT PULLBACK"
+            reasons.append("Preis ist ueber der Buy Zone, Ruecklauf abwarten.")
+        else:
+            score += 5
+            signal_type = "BUY ZONE BELOW"
+            signal_status = "WAIT REACTION"
+            reasons.append("Preis ist noch unter der Buy Zone.")
 
-        if m5_status == "5M BUY ENTRY READY":
+        if h4["trend"] == "BULLISH":
+            score += 8
+            reasons.append("H4 bestaetigt bullishe Richtung.")
+
+        if current_price > today_open:
+            score += 5
+            reasons.append("Heutiger Preis liegt ueber Daily Open.")
+
+        m5_buy_setup = (
+            m5["trend"] == "BULLISH" and
+            (m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH")
+        )
+
+        if m5_buy_setup:
+            score += 12
+            trigger_price = current_price
+            entry_price = max(prep_price, trigger_price)
             signal_type = "BUY 5M SETUP"
             signal_status = "ENTRY POSSIBLE"
+            reasons.append("5m gibt bullishes Entry-Setup.")
+        else:
+            entry_price = prep_price
+            reasons.append("5m hat noch kein klares Buy-Setup.")
 
-    elif preferred_side == "SELL":
-        signal_type = "SELL SIDE PREPARATION"
-        signal_status = "WATCH SELL ZONE"
-        zone_low = sell_zone_low
-        zone_high = sell_zone_high
-        entry_price = sell_entry
-        sl_price = sell_sl
-        tp1 = sell_tp1
-        tp2 = sell_tp2
-        tp_medium = sell_tp_medium
-        tp_large = sell_tp_large
+        risk = max(entry_price - sl_price, m5["atr"] * 0.8, 1e-9)
+        tp1 = entry_price + risk * 1.0
+        tp2 = entry_price + risk * 1.5
+        tp_medium = last_h1_high
+        tp_large = last_day_high
 
-        if sell_zone_low <= current_price <= sell_zone_high:
+        if tp1 <= entry_price:
+            tp1 = entry_price + max(m5["atr"], 1e-9)
+        if tp2 <= tp1:
+            tp2 = tp1 + max(m5["atr"] * 0.8, 1e-9)
+        if tp_medium <= tp2:
+            tp_medium = max(tp2 + h1["atr"] * 0.5, last_h1_high)
+        if tp_large <= tp_medium:
+            tp_large = max(tp_medium + d1["atr"] * 0.5, last_day_high)
+
+        reasons.append("TP klein = 5m TP1/TP2 | TP mittel = letztes 1H High | TP gross = letztes Daily High.")
+
+    elif bearish_bias:
+        score += 35
+        reasons.append("Last D und H1 sind bearish.")
+
+        day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
+
+        zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
+        zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
+
+        prep_price = (zone_low + zone_high) / 2
+        sl_price = last_h1_high
+        reasons.append("SL fuer Sell = letztes 1H High.")
+
+        if current_price >= zone_low and current_price <= zone_high:
+            score += 18
             signal_type = "SELL ZONE ACTIVE"
-            signal_status = "WAIT REACTION / CONFIRMATION"
+            signal_status = "WATCH SELL"
+            reasons.append("Preis ist in der Sell Zone.")
+        elif current_price < zone_low:
+            score += 10
+            signal_type = "SELL ZONE WATCH"
+            signal_status = "WAIT PULLBACK"
+            reasons.append("Preis ist unter der Sell Zone, Ruecklauf abwarten.")
+        else:
+            score += 5
+            signal_type = "SELL ZONE ABOVE"
+            signal_status = "WAIT REACTION"
+            reasons.append("Preis ist noch ueber der Sell Zone.")
 
-        if m5_status == "5M SELL ENTRY READY":
+        if h4["trend"] == "BEARISH":
+            score += 8
+            reasons.append("H4 bestaetigt bearishe Richtung.")
+
+        if current_price < today_open:
+            score += 5
+            reasons.append("Heutiger Preis liegt unter Daily Open.")
+
+        m5_sell_setup = (
+            m5["trend"] == "BEARISH" and
+            (m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH")
+        )
+
+        if m5_sell_setup:
+            score += 12
+            trigger_price = current_price
+            entry_price = min(prep_price, trigger_price)
             signal_type = "SELL 5M SETUP"
             signal_status = "ENTRY POSSIBLE"
+            reasons.append("5m gibt bearishes Entry-Setup.")
+        else:
+            entry_price = prep_price
+            reasons.append("5m hat noch kein klares Sell-Setup.")
+
+        risk = max(sl_price - entry_price, m5["atr"] * 0.8, 1e-9)
+        tp1 = entry_price - risk * 1.0
+        tp2 = entry_price - risk * 1.5
+        tp_medium = last_h1_low
+        tp_large = last_day_low
+
+        if tp1 >= entry_price:
+            tp1 = entry_price - max(m5["atr"], 1e-9)
+        if tp2 >= tp1:
+            tp2 = tp1 - max(m5["atr"] * 0.8, 1e-9)
+        if tp_medium >= tp2:
+            tp_medium = min(tp2 - h1["atr"] * 0.5, last_h1_low)
+        if tp_large >= tp_medium:
+            tp_large = min(tp_medium - d1["atr"] * 0.5, last_day_low)
+
+        reasons.append("TP klein = 5m TP1/TP2 | TP mittel = letztes 1H Low | TP gross = letztes Daily Low.")
+
+    else:
+        reasons.append("Last D und H1 geben keine gleiche klare Richtung.")
 
     explanation = " | ".join(reasons)
 
     return {
         "signal_type": signal_type,
         "signal_status": signal_status,
-        "signal_score": max(buy_score, sell_score),
-        "preferred_side": preferred_side,
-
-        "prep_price": entry_price,
-        "trigger_price": current_price,
+        "signal_score": score,
+        "prep_price": prep_price,
+        "trigger_price": trigger_price,
         "entry_price": entry_price,
         "sl_price": sl_price,
         "tp1": tp1,
@@ -1066,48 +1108,12 @@ def evaluate_signal_engine(mtf):
         "tp_large": tp_large,
         "zone_low": zone_low,
         "zone_high": zone_high,
-
         "last_day_high": last_day_high,
         "last_day_low": last_day_low,
         "last_h1_high": last_h1_high,
         "last_h1_low": last_h1_low,
-
-        "buy_score": buy_score,
-        "buy_zone_low": buy_zone_low,
-        "buy_zone_high": buy_zone_high,
-        "buy_entry": buy_entry,
-        "buy_sl": buy_sl,
-        "buy_tp1": buy_tp1,
-        "buy_tp2": buy_tp2,
-        "buy_tp_medium": buy_tp_medium,
-        "buy_tp_large": buy_tp_large,
-
-        "sell_score": sell_score,
-        "sell_zone_low": sell_zone_low,
-        "sell_zone_high": sell_zone_high,
-        "sell_entry": sell_entry,
-        "sell_sl": sell_sl,
-        "sell_tp1": sell_tp1,
-        "sell_tp2": sell_tp2,
-        "sell_tp_medium": sell_tp_medium,
-        "sell_tp_large": sell_tp_large,
-
-        "m5_possible_side": m5_possible_side,
-        "m5_status": m5_status,
-        "m5_entry": m5_entry,
-        "m5_sl": m5_sl,
-        "m5_tp1": m5_tp1,
-        "m5_tp2": m5_tp2,
-
-        "m15_possible_side": m15_possible_side,
-        "m15_status": m15_status,
-        "m15_entry": m15_entry,
-        "m15_sl": m15_sl,
-        "m15_tp1": m15_tp1,
-        "m15_tp2": m15_tp2,
-
         "explanation": explanation,
-        "timeframe_note": "D1 + H1 = main direction | 15m = medium preparation | 5m = fast preparation / entry",
+        "timeframe_note": "Last D + H1 = direction | 5m = entry",
     }
 
 
@@ -1863,124 +1869,6 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                     <div class="info-item"><div class="info-label">Last H1 High</div><div class="info-value">{format_price(signal['last_h1_high'])}</div></div>
                     <div class="info-item"><div class="info-label">Last H1 Low</div><div class="info-value">{format_price(signal['last_h1_low'])}</div></div>
                 </div>
-<div class="section-title">Both Zones / Possible Moves</div>
-<div class="info-list">
-    <div class="info-item">
-        <div class="info-label">Preferred Side</div>
-        <div class="info-value">{signal['preferred_side']}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">Main Signal</div>
-        <div class="info-value">{signal['signal_type']}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">BUY Score</div>
-        <div class="info-value">{signal['buy_score']}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">SELL Score</div>
-        <div class="info-value">{signal['sell_score']}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">BUY Zone</div>
-        <div class="info-value">{format_price(signal['buy_zone_low'])} - {format_price(signal['buy_zone_high'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">SELL Zone</div>
-        <div class="info-value">{format_price(signal['sell_zone_low'])} - {format_price(signal['sell_zone_high'])}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">BUY Entry Prep</div>
-        <div class="info-value">{format_price(signal['buy_entry'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">SELL Entry Prep</div>
-        <div class="info-value">{format_price(signal['sell_entry'])}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">BUY SL</div>
-        <div class="info-value">{format_price(signal['buy_sl'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">SELL SL</div>
-        <div class="info-value">{format_price(signal['sell_sl'])}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">BUY TP1 / TP2</div>
-        <div class="info-value">{format_price(signal['buy_tp1'])} / {format_price(signal['buy_tp2'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">SELL TP1 / TP2</div>
-        <div class="info-value">{format_price(signal['sell_tp1'])} / {format_price(signal['sell_tp2'])}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">BUY TP Medium / Large</div>
-        <div class="info-value">{format_price(signal['buy_tp_medium'])} / {format_price(signal['buy_tp_large'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">SELL TP Medium / Large</div>
-        <div class="info-value">{format_price(signal['sell_tp_medium'])} / {format_price(signal['sell_tp_large'])}</div>
-    </div>
-</div>
-
-<div class="section-title">5m / 15m Move Preparation</div>
-<div class="info-list">
-    <div class="info-item">
-        <div class="info-label">5m Side</div>
-        <div class="info-value">{signal['m5_possible_side']}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">5m Status</div>
-        <div class="info-value">{signal['m5_status']}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">5m Entry</div>
-        <div class="info-value">{format_price(signal['m5_entry'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">5m SL</div>
-        <div class="info-value">{format_price(signal['m5_sl'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">5m TP1</div>
-        <div class="info-value">{format_price(signal['m5_tp1'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">5m TP2</div>
-        <div class="info-value">{format_price(signal['m5_tp2'])}</div>
-    </div>
-
-    <div class="info-item">
-        <div class="info-label">15m Side</div>
-        <div class="info-value">{signal['m15_possible_side']}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">15m Status</div>
-        <div class="info-value">{signal['m15_status']}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">15m Entry</div>
-        <div class="info-value">{format_price(signal['m15_entry'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">15m SL</div>
-        <div class="info-value">{format_price(signal['m15_sl'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">15m TP1</div>
-        <div class="info-value">{format_price(signal['m15_tp1'])}</div>
-    </div>
-    <div class="info-item">
-        <div class="info-label">15m TP2</div>
-        <div class="info-value">{format_price(signal['m15_tp2'])}</div>
-    </div>
-</div>
 
                 <div class="section-title">Signal Erklaerung</div>
                 <div class="card" style="background:rgba(255,255,255,0.02); box-shadow:none;">
