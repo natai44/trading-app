@@ -834,6 +834,7 @@ def evaluate_signal_engine(mtf):
     daily_info = mtf["daily_info"]
 
     current_price = m5["current_price"]
+
     last_day_high = daily_info["last_day_high"]
     last_day_low = daily_info["last_day_low"]
     today_open = daily_info["today_open"]
@@ -841,177 +842,210 @@ def evaluate_signal_engine(mtf):
     last_h1_high = h1["recent_high"]
     last_h1_low = h1["recent_low"]
 
+    day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
+
     reasons = []
-    score = 0
 
-    bullish_bias = d1["trend"] == "BULLISH" and h1["trend"] == "BULLISH"
-    bearish_bias = d1["trend"] == "BEARISH" and h1["trend"] == "BEARISH"
+    # -------------------------------------------------
+    # BUY ZONE IMMER SICHTBAR
+    # -------------------------------------------------
+    buy_zone_low = min(last_day_low + day_range * 0.10, h1["support"])
+    buy_zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
+    buy_prep_entry = (buy_zone_low + buy_zone_high) / 2
 
-    signal_type = "NO CLEAR ZONE"
-    signal_status = "NO TRADE"
+    buy_sl = last_h1_low
+    buy_tp_medium = last_h1_high
+    buy_tp_large = last_day_high
 
-    zone_low = None
-    zone_high = None
-    prep_price = None
-    trigger_price = None
+    buy_risk = buy_prep_entry - buy_sl
+    if buy_risk <= 0:
+        buy_risk = max(m5["atr"] * 1.2, abs(buy_prep_entry) * 0.001)
+
+    buy_tp1 = buy_prep_entry + buy_risk * 1.0
+    buy_tp2 = buy_prep_entry + buy_risk * 1.5
+
+    # -------------------------------------------------
+    # SELL ZONE IMMER SICHTBAR
+    # -------------------------------------------------
+    sell_zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
+    sell_zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
+    sell_prep_entry = (sell_zone_low + sell_zone_high) / 2
+
+    sell_sl = last_h1_high
+    sell_tp_medium = last_h1_low
+    sell_tp_large = last_day_low
+
+    sell_risk = sell_sl - sell_prep_entry
+    if sell_risk <= 0:
+        sell_risk = max(m5["atr"] * 1.2, abs(sell_prep_entry) * 0.001)
+
+    sell_tp1 = sell_prep_entry - sell_risk * 1.0
+    sell_tp2 = sell_prep_entry - sell_risk * 1.5
+
+    # -------------------------------------------------
+    # BUY / SELL SCORES
+    # -------------------------------------------------
+    buy_score = 0
+    sell_score = 0
+
+    # D1 / H1 / H4 direction
+    if d1["trend"] == "BULLISH":
+        buy_score += 20
+    elif d1["trend"] == "BEARISH":
+        sell_score += 20
+
+    if h1["trend"] == "BULLISH":
+        buy_score += 25
+    elif h1["trend"] == "BEARISH":
+        sell_score += 25
+
+    if h4["trend"] == "BULLISH":
+        buy_score += 10
+    elif h4["trend"] == "BEARISH":
+        sell_score += 10
+
+    # Today open relation
+    if current_price > today_open:
+        buy_score += 5
+    elif current_price < today_open:
+        sell_score += 5
+
+    # Premium / Discount
+    if current_price <= m5["discount_zone"]:
+        buy_score += 10
+        reasons.append("Preis liegt in/nahe Discount Zone -> Buy Seite interessanter.")
+    if current_price >= m5["premium_zone"]:
+        sell_score += 10
+        reasons.append("Preis liegt in/nahe Premium Zone -> Sell Seite interessanter.")
+
+    # Liquidity relation
+    if current_price < m5["buy_side_liquidity"]:
+        buy_score += 3
+    if current_price > m5["sell_side_liquidity"]:
+        sell_score += 3
+
+    # M5 trigger only for better entry
+    buy_trigger = (
+        m5["trend"] == "BULLISH"
+        and (m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH")
+    )
+    sell_trigger = (
+        m5["trend"] == "BEARISH"
+        and (m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH")
+    )
+
+    if buy_trigger:
+        buy_score += 12
+        reasons.append("5m bestaetigt moeglichen Buy Entry.")
+    if sell_trigger:
+        sell_score += 12
+        reasons.append("5m bestaetigt moeglichen Sell Entry.")
+
+    # Zone proximity
+    if buy_zone_low <= current_price <= buy_zone_high:
+        buy_score += 18
+        reasons.append("Preis ist in der Buy Zone.")
+    elif current_price > buy_zone_high:
+        buy_score += 6
+        reasons.append("Preis ist ueber der Buy Zone, Ruecklauf moeglich.")
+    else:
+        buy_score += 4
+        reasons.append("Preis ist unter der Buy Zone, Reaktion spaeter moeglich.")
+
+    if sell_zone_low <= current_price <= sell_zone_high:
+        sell_score += 18
+        reasons.append("Preis ist in der Sell Zone.")
+    elif current_price < sell_zone_low:
+        sell_score += 6
+        reasons.append("Preis ist unter der Sell Zone, Ruecklauf moeglich.")
+    else:
+        sell_score += 4
+        reasons.append("Preis ist ueber der Sell Zone, Reaktion spaeter moeglich.")
+
+    # -------------------------------------------------
+    # PREFERRED SIDE
+    # -------------------------------------------------
+    if buy_score > sell_score + 8:
+        preferred_side = "BUY"
+    elif sell_score > buy_score + 8:
+        preferred_side = "SELL"
+    else:
+        preferred_side = "RANGE / WAIT"
+
+    # -------------------------------------------------
+    # FINAL MAIN SIGNAL
+    # -------------------------------------------------
+    signal_type = "MARKET STRUCTURE READY"
+    signal_status = "WATCH ZONES"
+
     entry_price = None
     sl_price = None
     tp1 = None
     tp2 = None
     tp_medium = None
     tp_large = None
+    zone_low = None
+    zone_high = None
 
-    if bullish_bias:
-        score += 35
-        reasons.append("Last D und H1 sind bullish.")
+    if preferred_side == "BUY":
+        zone_low = buy_zone_low
+        zone_high = buy_zone_high
+        entry_price = current_price if buy_trigger else buy_prep_entry
+        sl_price = buy_sl
+        tp1 = buy_tp1 if not buy_trigger else entry_price + max(entry_price - sl_price, m5["atr"] * 1.2) * 1.0
+        tp2 = buy_tp2 if not buy_trigger else entry_price + max(entry_price - sl_price, m5["atr"] * 1.2) * 1.5
+        tp_medium = buy_tp_medium
+        tp_large = buy_tp_large
 
-        day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
-
-        zone_low = min(last_day_low + day_range * 0.10, h1["support"])
-        zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
-
-        prep_price = (zone_low + zone_high) / 2
-        sl_price = last_h1_low
-        reasons.append("SL fuer Buy = letztes 1H Low.")
-
-        if current_price >= zone_low and current_price <= zone_high:
-            score += 18
-            signal_type = "BUY ZONE ACTIVE"
-            signal_status = "WATCH BUY"
-            reasons.append("Preis ist in der Buy Zone.")
-        elif current_price > zone_high:
-            score += 10
-            signal_type = "BUY ZONE WATCH"
-            signal_status = "WAIT PULLBACK"
-            reasons.append("Preis ist ueber der Buy Zone, Ruecklauf abwarten.")
-        else:
-            score += 5
-            signal_type = "BUY ZONE BELOW"
-            signal_status = "WAIT REACTION"
-            reasons.append("Preis ist noch unter der Buy Zone.")
-
-        if h4["trend"] == "BULLISH":
-            score += 8
-            reasons.append("H4 bestaetigt bullishe Richtung.")
-
-        if current_price > today_open:
-            score += 5
-            reasons.append("Heutiger Preis liegt ueber Daily Open.")
-
-        m5_buy_setup = (
-            m5["trend"] == "BULLISH" and
-            (m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH")
-        )
-
-        if m5_buy_setup:
-            score += 12
-            trigger_price = current_price
-            entry_price = max(prep_price, trigger_price)
+        if buy_trigger:
             signal_type = "BUY 5M SETUP"
             signal_status = "ENTRY POSSIBLE"
-            reasons.append("5m gibt bullishes Entry-Setup.")
+        elif buy_zone_low <= current_price <= buy_zone_high:
+            signal_type = "BUY ZONE ACTIVE"
+            signal_status = "WAIT REACTION / CONFIRMATION"
         else:
-            entry_price = prep_price
-            reasons.append("5m hat noch kein klares Buy-Setup.")
+            signal_type = "BUY SIDE PREPARATION"
+            signal_status = "WATCH BUY ZONE"
 
-        risk = max(entry_price - sl_price, m5["atr"] * 0.8, 1e-9)
-        tp1 = entry_price + risk * 1.0
-        tp2 = entry_price + risk * 1.5
-        tp_medium = last_h1_high
-        tp_large = last_day_high
+    elif preferred_side == "SELL":
+        zone_low = sell_zone_low
+        zone_high = sell_zone_high
+        entry_price = current_price if sell_trigger else sell_prep_entry
+        sl_price = sell_sl
+        tp1 = sell_tp1 if not sell_trigger else entry_price - max(sl_price - entry_price, m5["atr"] * 1.2) * 1.0
+        tp2 = sell_tp2 if not sell_trigger else entry_price - max(sl_price - entry_price, m5["atr"] * 1.2) * 1.5
+        tp_medium = sell_tp_medium
+        tp_large = sell_tp_large
 
-        if tp1 <= entry_price:
-            tp1 = entry_price + max(m5["atr"], 1e-9)
-        if tp2 <= tp1:
-            tp2 = tp1 + max(m5["atr"] * 0.8, 1e-9)
-        if tp_medium <= tp2:
-            tp_medium = max(tp2 + h1["atr"] * 0.5, last_h1_high)
-        if tp_large <= tp_medium:
-            tp_large = max(tp_medium + d1["atr"] * 0.5, last_day_high)
-
-        reasons.append("TP klein = 5m TP1/TP2 | TP mittel = letztes 1H High | TP gross = letztes Daily High.")
-
-    elif bearish_bias:
-        score += 35
-        reasons.append("Last D und H1 sind bearish.")
-
-        day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
-
-        zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
-        zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
-
-        prep_price = (zone_low + zone_high) / 2
-        sl_price = last_h1_high
-        reasons.append("SL fuer Sell = letztes 1H High.")
-
-        if current_price >= zone_low and current_price <= zone_high:
-            score += 18
-            signal_type = "SELL ZONE ACTIVE"
-            signal_status = "WATCH SELL"
-            reasons.append("Preis ist in der Sell Zone.")
-        elif current_price < zone_low:
-            score += 10
-            signal_type = "SELL ZONE WATCH"
-            signal_status = "WAIT PULLBACK"
-            reasons.append("Preis ist unter der Sell Zone, Ruecklauf abwarten.")
-        else:
-            score += 5
-            signal_type = "SELL ZONE ABOVE"
-            signal_status = "WAIT REACTION"
-            reasons.append("Preis ist noch ueber der Sell Zone.")
-
-        if h4["trend"] == "BEARISH":
-            score += 8
-            reasons.append("H4 bestaetigt bearishe Richtung.")
-
-        if current_price < today_open:
-            score += 5
-            reasons.append("Heutiger Preis liegt unter Daily Open.")
-
-        m5_sell_setup = (
-            m5["trend"] == "BEARISH" and
-            (m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH")
-        )
-
-        if m5_sell_setup:
-            score += 12
-            trigger_price = current_price
-            entry_price = min(prep_price, trigger_price)
+        if sell_trigger:
             signal_type = "SELL 5M SETUP"
             signal_status = "ENTRY POSSIBLE"
-            reasons.append("5m gibt bearishes Entry-Setup.")
+        elif sell_zone_low <= current_price <= sell_zone_high:
+            signal_type = "SELL ZONE ACTIVE"
+            signal_status = "WAIT REACTION / CONFIRMATION"
         else:
-            entry_price = prep_price
-            reasons.append("5m hat noch kein klares Sell-Setup.")
-
-        risk = max(sl_price - entry_price, m5["atr"] * 0.8, 1e-9)
-        tp1 = entry_price - risk * 1.0
-        tp2 = entry_price - risk * 1.5
-        tp_medium = last_h1_low
-        tp_large = last_day_low
-
-        if tp1 >= entry_price:
-            tp1 = entry_price - max(m5["atr"], 1e-9)
-        if tp2 >= tp1:
-            tp2 = tp1 - max(m5["atr"] * 0.8, 1e-9)
-        if tp_medium >= tp2:
-            tp_medium = min(tp2 - h1["atr"] * 0.5, last_h1_low)
-        if tp_large >= tp_medium:
-            tp_large = min(tp_medium - d1["atr"] * 0.5, last_day_low)
-
-        reasons.append("TP klein = 5m TP1/TP2 | TP mittel = letztes 1H Low | TP gross = letztes Daily Low.")
+            signal_type = "SELL SIDE PREPARATION"
+            signal_status = "WATCH SELL ZONE"
 
     else:
-        reasons.append("Last D und H1 geben keine gleiche klare Richtung.")
+        # show a neutral preparation instead of only "no clear zone"
+        zone_low = None
+        zone_high = None
+        signal_type = "BOTH ZONES VISIBLE"
+        signal_status = "WAIT - WATCH BUY & SELL ZONES"
 
     explanation = " | ".join(reasons)
 
     return {
+        # main side
         "signal_type": signal_type,
         "signal_status": signal_status,
-        "signal_score": score,
-        "prep_price": prep_price,
-        "trigger_price": trigger_price,
+        "signal_score": max(buy_score, sell_score),
+        "preferred_side": preferred_side,
+
+        # main displayed setup
+        "prep_price": entry_price,
+        "trigger_price": current_price,
         "entry_price": entry_price,
         "sl_price": sl_price,
         "tp1": tp1,
@@ -1020,13 +1054,39 @@ def evaluate_signal_engine(mtf):
         "tp_large": tp_large,
         "zone_low": zone_low,
         "zone_high": zone_high,
+
+        # shared levels
         "last_day_high": last_day_high,
         "last_day_low": last_day_low,
         "last_h1_high": last_h1_high,
         "last_h1_low": last_h1_low,
+
+        # buy side always visible
+        "buy_score": buy_score,
+        "buy_zone_low": buy_zone_low,
+        "buy_zone_high": buy_zone_high,
+        "buy_entry": buy_prep_entry,
+        "buy_sl": buy_sl,
+        "buy_tp1": buy_tp1,
+        "buy_tp2": buy_tp2,
+        "buy_tp_medium": buy_tp_medium,
+        "buy_tp_large": buy_tp_large,
+
+        # sell side always visible
+        "sell_score": sell_score,
+        "sell_zone_low": sell_zone_low,
+        "sell_zone_high": sell_zone_high,
+        "sell_entry": sell_prep_entry,
+        "sell_sl": sell_sl,
+        "sell_tp1": sell_tp1,
+        "sell_tp2": sell_tp2,
+        "sell_tp_medium": sell_tp_medium,
+        "sell_tp_large": sell_tp_large,
+
         "explanation": explanation,
-        "timeframe_note": "Last D + H1 = direction | 5m = entry",
+        "timeframe_note": "Both zones always visible | D1 + H1 = main direction | 5m = entry confirmation only",
     }
+
 
 
 def get_latest_signal(market: str, symbol: str):
