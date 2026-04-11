@@ -386,27 +386,6 @@ def init_db():
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS alert_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            alert_type TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            signal_type TEXT NOT NULL,
-            signal_status TEXT NOT NULL,
-            signal_score REAL NOT NULL,
-            entry_price REAL,
-            sl_price REAL,
-            tp1 REAL,
-            tp2 REAL,
-            tp_medium REAL,
-            tp_large REAL,
-            message TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-
     cur.execute("SELECT * FROM users WHERE username = ?", (DEFAULT_ADMIN_USERNAME,))
     if not cur.fetchone():
         cur.execute("""
@@ -1330,35 +1309,29 @@ def get_signal_history(market: str, symbol: str, limit: int = 12):
     return rows
 
 
-
 def draw_chart(candles, analysis, signal, symbol: str, market: str):
     width = 1420
     height = 1030
     chart_top = 70
-    chart_bottom = 500
+    chart_bottom = 430
     left_pad = 70
     right_pad = 30
 
     img = np.zeros((height, width, 3), dtype=np.uint8)
     img[:] = (11, 14, 20)
 
-    # show fewer candles so bodies stay visible
-    view_candles = candles[-80:] if len(candles) > 80 else candles
-    highs = [c["high"] for c in view_candles]
-    lows = [c["low"] for c in view_candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
 
     extra_prices = list(highs + lows)
     for p in [
-        signal.get("zone_low"), signal.get("zone_high"),
-        signal.get("entry_price"), signal.get("sl_price"),
-        signal.get("tp1"), signal.get("tp2"),
-        signal.get("tp_medium"), signal.get("tp_large"),
-        signal.get("last_day_high"), signal.get("last_day_low"),
-        signal.get("last_h1_high"), signal.get("last_h1_low"),
-        signal.get("fib_50"), signal.get("fib_618"), signal.get("fib_786"),
-        analysis.get("buy_side_liquidity"), analysis.get("sell_side_liquidity"),
-        analysis.get("support"), analysis.get("resistance"),
-        analysis.get("premium_zone"), analysis.get("discount_zone"),
+        signal["zone_low"], signal["zone_high"], signal["entry_price"], signal["sl_price"],
+        signal["tp1"], signal["tp2"], signal["tp_medium"], signal["tp_large"],
+        signal["last_day_high"], signal["last_day_low"],
+        signal["last_h1_high"], signal["last_h1_low"],
+        analysis["buy_side_liquidity"], analysis["sell_side_liquidity"],
+        analysis["support"], analysis["resistance"],
+        analysis["premium_zone"], analysis["discount_zone"]
     ]:
         if p is not None:
             extra_prices.append(p)
@@ -1371,10 +1344,10 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         usable_h = chart_bottom - chart_top
         return int(chart_bottom - ((price - min_price) / price_range) * usable_h)
 
-    n = len(view_candles)
+    n = len(candles)
     usable_w = width - left_pad - right_pad
-    candle_step = max(usable_w // max(n, 1), 12)
-    candle_w = max(6, min(14, candle_step - 3))
+    candle_step = max(usable_w // max(n, 1), 8)
+    candle_w = max(4, candle_step // 2)
 
     overlay = img.copy()
 
@@ -1383,25 +1356,20 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
     cv2.rectangle(overlay, (left_pad, y_premium), (width - right_pad, chart_bottom), (20, 60, 20), -1)
     cv2.rectangle(overlay, (left_pad, chart_top), (width - right_pad, y_discount), (80, 20, 20), -1)
 
-    if signal.get("buy_zone_low") is not None and signal.get("buy_zone_high") is not None:
-        zy_top = price_to_y(signal["buy_zone_high"])
-        zy_bottom = price_to_y(signal["buy_zone_low"])
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (0, 70, 0), -1)
+    if signal["zone_low"] is not None and signal["zone_high"] is not None:
+        zy_top = price_to_y(signal["zone_high"])
+        zy_bottom = price_to_y(signal["zone_low"])
+        zone_color = (0, 110, 0) if "BUY" in signal["signal_type"] else (0, 0, 110) if "SELL" in signal["signal_type"] else (70, 70, 70)
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), zone_color, -1)
 
-    if signal.get("sell_zone_low") is not None and signal.get("sell_zone_high") is not None:
-        zy_top = price_to_y(signal["sell_zone_high"])
-        zy_bottom = price_to_y(signal["sell_zone_low"])
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (70, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.10, img, 0.90, 0, img)
 
-    cv2.addWeighted(overlay, 0.12, img, 0.88, 0, img)
-
-    for i in range(7):
-        y = chart_top + int((chart_bottom - chart_top) * i / 6)
+    for i in range(6):
+        y = chart_top + int((chart_bottom - chart_top) * i / 5)
         cv2.line(img, (left_pad, y), (width - right_pad, y), (45, 50, 60), 1)
 
-    # real candles
-    for i, c in enumerate(view_candles):
-        x = left_pad + i * candle_step + candle_step // 2
+    for i, c in enumerate(candles):
+        x = left_pad + i * candle_step
         y_open = price_to_y(c["open"])
         y_close = price_to_y(c["close"])
         y_high = price_to_y(c["high"])
@@ -1413,42 +1381,46 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         cv2.line(img, (x, y_high), (x, y_low), color, 1)
         top = min(y_open, y_close)
         bottom = max(y_open, y_close)
-        if bottom - top < 4:
-            bottom = top + 4
+        if bottom == top:
+            bottom += 1
         cv2.rectangle(img, (x - candle_w // 2, top), (x + candle_w // 2, bottom), color, -1)
 
     levels = [
-        ("LAST D HIGH", signal.get("last_day_high"), (255, 255, 255)),
-        ("LAST D LOW", signal.get("last_day_low"), (220, 220, 220)),
-        ("LAST H1 HIGH", signal.get("last_h1_high"), (255, 170, 170)),
-        ("LAST H1 LOW", signal.get("last_h1_low"), (170, 220, 255)),
-        ("FIB 0.5", signal.get("fib_50"), (255, 220, 120)),
-        ("FIB 0.618", signal.get("fib_618"), (255, 200, 80)),
-        ("FIB 0.786", signal.get("fib_786"), (255, 180, 40)),
-        ("BSL", analysis.get("buy_side_liquidity"), (255, 120, 0)),
-        ("SSL", analysis.get("sell_side_liquidity"), (180, 0, 255)),
-        ("SUPPORT", analysis.get("support"), (120, 200, 255)),
-        ("RESIST", analysis.get("resistance"), (255, 80, 80)),
-        ("PREMIUM", analysis.get("premium_zone"), (160, 120, 255)),
-        ("DISCOUNT", analysis.get("discount_zone"), (80, 255, 180)),
+        ("LAST D HIGH", signal["last_day_high"], (255, 255, 255)),
+        ("LAST D LOW", signal["last_day_low"], (220, 220, 220)),
+        ("LAST H1 HIGH", signal["last_h1_high"], (255, 170, 170)),
+        ("LAST H1 LOW", signal["last_h1_low"], (170, 220, 255)),
+        ("BSL", analysis["buy_side_liquidity"], (255, 120, 0)),
+        ("SSL", analysis["sell_side_liquidity"], (180, 0, 255)),
+        ("SUPPORT", analysis["support"], (120, 200, 255)),
+        ("RESIST", analysis["resistance"], (255, 80, 80)),
+        ("PREMIUM", analysis["premium_zone"], (160, 120, 255)),
+        ("DISCOUNT", analysis["discount_zone"], (80, 255, 180)),
     ]
 
-    if signal.get("entry_price") is not None:
+    if analysis["eq_high"] is not None:
+        levels.append(("EQH", analysis["eq_high"], (250, 250, 250)))
+    if analysis["eq_low"] is not None:
+        levels.append(("EQL", analysis["eq_low"], (210, 210, 210)))
+
+    if signal["zone_low"] is not None:
+        levels.append(("ZONE LOW", signal["zone_low"], (0, 255, 120)))
+    if signal["zone_high"] is not None:
+        levels.append(("ZONE HIGH", signal["zone_high"], (0, 255, 120)))
+    if signal["entry_price"] is not None:
         levels.append(("ENTRY", signal["entry_price"], (0, 255, 0)))
-    if signal.get("sl_price") is not None:
+    if signal["sl_price"] is not None:
         levels.append(("SL", signal["sl_price"], (0, 0, 255)))
-    if signal.get("tp1") is not None:
+    if signal["tp1"] is not None:
         levels.append(("TP1", signal["tp1"], (0, 255, 255)))
-    if signal.get("tp2") is not None:
+    if signal["tp2"] is not None:
         levels.append(("TP2", signal["tp2"], (255, 220, 0)))
-    if signal.get("tp_medium") is not None:
+    if signal["tp_medium"] is not None:
         levels.append(("TP MED", signal["tp_medium"], (255, 180, 0)))
-    if signal.get("tp_large") is not None:
+    if signal["tp_large"] is not None:
         levels.append(("TP LARGE", signal["tp_large"], (255, 140, 0)))
 
     for label, price, color in levels:
-        if price is None:
-            continue
         y = price_to_y(price)
         cv2.line(img, (left_pad, y), (width - right_pad, y), color, 1)
         cv2.putText(img, f"{label}: {format_price(price)}", (left_pad + 10, y - 6),
@@ -1456,7 +1428,7 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
     cv2.putText(
         img,
-        f"{market.upper()} | {symbol.upper()} | Signal: {signal.get('signal_type', '')} | Trend M5: {analysis.get('trend', '')} | BOS: {analysis.get('bos', '')} | CHOCH: {analysis.get('choch', '')}",
+        f"{market.upper()} | {symbol.upper()} | Signal: {signal['signal_type']} | Trend M5: {analysis['trend']} | BOS: {analysis['bos']} | CHOCH: {analysis['choch']}",
         (25, 35),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.58,
@@ -1464,26 +1436,25 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         2
     )
 
-    cv2.rectangle(img, (0, 540), (width, height), (20, 24, 30), -1)
-    cv2.line(img, (0, 540), (width, 540), (0, 255, 120), 2)
+    cv2.rectangle(img, (0, 470), (width, height), (20, 24, 30), -1)
+    cv2.line(img, (0, 470), (width, 470), (0, 255, 120), 2)
 
     info_lines = [
-        f"Signal: {signal.get('signal_type', '-')} | Status: {signal.get('signal_status', '-')}",
-        f"Buy Zone: {format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}",
-        f"Sell Zone: {format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}",
-        f"Entry: {format_price(signal.get('entry_price'))} | SL: {format_price(signal.get('sl_price'))}",
-        f"TP1: {format_price(signal.get('tp1'))} | TP2: {format_price(signal.get('tp2'))}",
-        f"TP Medium: {format_price(signal.get('tp_medium'))} | TP Large: {format_price(signal.get('tp_large'))}",
-        f"Fib 0.5 / 0.618 / 0.786: {format_price(signal.get('fib_50'))} / {format_price(signal.get('fib_618'))} / {format_price(signal.get('fib_786'))}",
-        f"Last D High/Low: {format_price(signal.get('last_day_high'))} / {format_price(signal.get('last_day_low'))}",
-        f"Last H1 High/Low: {format_price(signal.get('last_h1_high'))} / {format_price(signal.get('last_h1_low'))}",
-        f"Trend: {analysis.get('trend')} | BOS: {analysis.get('bos')} | CHOCH: {analysis.get('choch')}",
-        f"Liquidity: {format_price(analysis.get('buy_side_liquidity'))} / {format_price(analysis.get('sell_side_liquidity'))}",
-        f"Support / Resistance: {format_price(analysis.get('support'))} / {format_price(analysis.get('resistance'))}",
-        f"FVG: {analysis.get('fvg_text', '-')}",
+        f"Signal: {signal['signal_type']} | Status: {signal['signal_status']}",
+        f"Zone: {format_price(signal['zone_low'])} - {format_price(signal['zone_high'])}",
+        f"Entry: {format_price(signal['entry_price'])} | SL: {format_price(signal['sl_price'])}",
+        f"TP1: {format_price(signal['tp1'])} | TP2: {format_price(signal['tp2'])}",
+        f"TP Medium: {format_price(signal['tp_medium'])} | TP Large: {format_price(signal['tp_large'])}",
+        f"Last D High/Low: {format_price(signal['last_day_high'])} / {format_price(signal['last_day_low'])}",
+        f"Last H1 High/Low: {format_price(signal['last_h1_high'])} / {format_price(signal['last_h1_low'])}",
+        f"Trend: {analysis['trend']} | BOS: {analysis['bos']} | CHOCH: {analysis['choch']}",
+        f"Liquidity: {format_price(analysis['buy_side_liquidity'])} / {format_price(analysis['sell_side_liquidity'])}",
+        f"Support / Resistance: {format_price(analysis['support'])} / {format_price(analysis['resistance'])}",
+        f"FVG: {analysis['fvg_text']}",
+        f"Premium / Discount: {format_price(analysis['premium_zone'])} / {format_price(analysis['discount_zone'])}",
     ]
 
-    y = 575
+    y = 505
     for line in info_lines:
         cv2.putText(img, line[:155], (25, y), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (235, 235, 235), 1)
         y += 24
@@ -1491,182 +1462,8 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
     return img
 
 
-
-
-def safe_float(value):
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
-    except Exception:
-        pass
-
-
-def build_alert_type_and_severity(signal: dict):
-    signal_type = signal.get("signal_type", "")
-    score = safe_float(signal.get("signal_score")) or 0
-
-    if signal_type in ["BUY ENTRY READY", "BUY 5M SETUP"] and score >= 55:
-        return "BUY_SETUP_READY", "high"
-    if signal_type in ["SELL ENTRY READY", "SELL 5M SETUP"] and score >= 55:
-        return "SELL_SETUP_READY", "high"
-    if signal_type == "BUY ZONE ACTIVE" and score >= 45:
-        return "BUY_ZONE_ACTIVE", "medium"
-    if signal_type == "SELL ZONE ACTIVE" and score >= 45:
-        return "SELL_ZONE_ACTIVE", "medium"
-    if signal_type in ["BUY SIDE PREPARATION", "SELL SIDE PREPARATION", "BOTH ZONES VISIBLE"] and score >= 35:
-        return "MARKET_PREPARATION", "low"
-    return None, None
-
-
-def build_alert_message(market: str, symbol: str, signal: dict, alert_type: str):
-    preferred = signal.get("preferred_side", "-")
-    entry = format_price(signal.get("entry_price"))
-    sl = format_price(signal.get("sl_price"))
-    tp1 = format_price(signal.get("tp1"))
-    tp2 = format_price(signal.get("tp2"))
-    tp_medium = format_price(signal.get("tp_medium"))
-    tp_large = format_price(signal.get("tp_large"))
-    buy_zone = f"{format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}"
-    sell_zone = f"{format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}"
-    score = signal.get("signal_score", 0)
-
-    if alert_type == "BUY_SETUP_READY":
-        title = "🚀 BUY SETUP READY"
-    elif alert_type == "SELL_SETUP_READY":
-        title = "🔥 SELL SETUP READY"
-    elif alert_type == "BUY_ZONE_ACTIVE":
-        title = "⚠️ BUY ZONE ACTIVE"
-    elif alert_type == "SELL_ZONE_ACTIVE":
-        title = "⚠️ SELL ZONE ACTIVE"
-    else:
-        title = "🧭 MARKET PREPARATION"
-
-    return (
-        f"{title}\n"
-        f"Market: {market.upper()} | Symbol: {symbol}\n"
-        f"Signal: {signal.get('signal_type', '-')}\n"
-        f"Preferred: {preferred} | Score: {score}\n"
-        f"Buy Zone: {buy_zone}\n"
-        f"Sell Zone: {sell_zone}\n"
-        f"Entry: {entry}\n"
-        f"SL: {sl}\n"
-        f"TP1 / TP2: {tp1} / {tp2}\n"
-        f"TP M / L: {tp_medium} / {tp_large}"
-    )
-
-
-def store_alert_if_new(market: str, symbol: str, signal: dict):
-    alert_type, severity = build_alert_type_and_severity(signal)
-    if not alert_type:
-        return None
-
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM alert_history
-        WHERE market = ? AND symbol = ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (market, symbol))
-    latest = cur.fetchone()
-
-    changed = True
-    if latest:
-        same_type = latest["alert_type"] == alert_type
-        same_signal = latest["signal_type"] == signal.get("signal_type")
-        same_status = latest["signal_status"] == signal.get("signal_status")
-        score_diff_small = abs(float(latest["signal_score"]) - float(signal.get("signal_score", 0))) < 4
-        if same_type and same_signal and same_status and score_diff_small:
-            changed = False
-
-    if not changed:
-        conn.close()
-        return None
-
-    message = build_alert_message(market, symbol, signal, alert_type)
-    cur.execute("""
-        INSERT INTO alert_history (
-            market, symbol, alert_type, severity, signal_type, signal_status, signal_score,
-            entry_price, sl_price, tp1, tp2, tp_medium, tp_large, message, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        market, symbol, alert_type, severity, signal.get("signal_type", "-"), signal.get("signal_status", "-"),
-        signal.get("signal_score", 0), signal.get("entry_price"), signal.get("sl_price"),
-        signal.get("tp1"), signal.get("tp2"), signal.get("tp_medium"), signal.get("tp_large"),
-        message, now_iso()
-    ))
-    conn.commit()
-    conn.close()
-    return {"alert_type": alert_type, "severity": severity, "message": message}
-
-
-def maybe_send_telegram_alert(market: str, symbol: str, alert_obj):
-    if not alert_obj:
-        return
-    if symbol.strip().upper() not in ["BTCUSDT", "XAU/USD", "XAUUSD"]:
-        return
-
-    key = f"{market}:{symbol}:{alert_obj['alert_type']}"
-    now = time.time()
-    last_sent = LAST_TELEGRAM_ALERTS.get(key, 0)
-    if now - last_sent < TELEGRAM_ALERT_COOLDOWN:
-        return
-
-    send_telegram_message(alert_obj["message"])
-    LAST_TELEGRAM_ALERTS[key] = now
-
-
-def get_alert_history(limit: int = 20):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM alert_history
-        ORDER BY id DESC
-        LIMIT ?
-    """, (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def alert_scan_loop():
-    while True:
-        try:
-            for market, symbol in ALERT_SYMBOLS:
-                try:
-                    mtf = get_multi_timeframe_analysis(market, symbol)
-                    signal = evaluate_signal_engine(mtf)
-                    store_signal_if_changed(market, symbol, signal)
-                    alert_obj = store_alert_if_new(market, symbol, signal)
-                    maybe_send_telegram_alert(market, symbol, alert_obj)
-                except Exception:
-                    pass
-            time.sleep(ALERT_SCAN_SECONDS)
-        except Exception:
-            time.sleep(ALERT_SCAN_SECONDS)
-
-
-def ensure_alert_thread():
-    global ALERT_THREAD_STARTED
-    if ALERT_THREAD_STARTED:
-        return
-    t = threading.Thread(target=alert_scan_loop, daemon=True)
-    t.start()
-    ALERT_THREAD_STARTED = True
-
-
 @app.get("/login", response_class=HTMLResponse)
 def login_page(lang: str = "de", error: str = "", msg: str = ""):
-    ensure_alert_thread()
     error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
 
@@ -2031,7 +1828,6 @@ def admin_delete_user(request: Request, username: str = Form(...), lang: str = F
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, lang: str = "de"):
-    ensure_alert_thread()
     user = require_login(request)
     if not user:
         return RedirectResponse(url=f"/login?lang={lang}", status_code=303)
@@ -2084,7 +1880,6 @@ def home(request: Request, lang: str = "de"):
 
 @app.get("/analyze", response_class=HTMLResponse)
 def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
-    ensure_alert_thread()
     user = require_login(request)
     if not user:
         return RedirectResponse(url=f"/login?lang={lang}", status_code=303)
@@ -2106,10 +1901,7 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         signal = evaluate_signal_engine(mtf)
         changed = store_signal_if_changed(market, symbol, signal)
-        alert_obj = store_alert_if_new(market, symbol, signal)
-        maybe_send_telegram_alert(market, symbol, alert_obj)
         history = get_signal_history(market, symbol, limit=12)
-        alert_history_rows = get_alert_history(limit=20)
 
         chart = draw_chart(mtf["M5"]["candles"], m5, signal, symbol, market)
         img_b64 = to_base64_png(chart)
@@ -2128,8 +1920,6 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         if changed:
             signal_banner += '<div class="banner banner-blue">📌 Neues Signal-Update gespeichert.</div>'
-        if alert_obj:
-            signal_banner += f'<div class="banner banner-success">🔔 ALERT: {alert_obj["alert_type"]} | {alert_obj["severity"].upper()}</div>'
 
         history_rows = ""
         for row in history:
@@ -2150,25 +1940,6 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
             </tr>
             """
 
-
-        alert_table_rows = ""
-        for a in alert_history_rows:
-            alert_table_rows += f"""
-            <tr>
-                <td>{a['created_at'][:19].replace('T', ' ')}</td>
-                <td>{a['market'].upper()}</td>
-                <td>{a['symbol']}</td>
-                <td>{a['alert_type']}</td>
-                <td>{a['severity']}</td>
-                <td>{a['signal_type']}</td>
-                <td>{a['signal_status']}</td>
-                <td>{a['signal_score']:.0f}</td>
-                <td>{format_price(a['entry_price'])}</td>
-                <td>{format_price(a['sl_price'])}</td>
-                <td>{format_price(a['tp1'])}</td>
-                <td>{format_price(a['tp2'])}</td>
-            </tr>
-            """
         body = f"""
         {topbar(lang, user, True, user['role'] == 'admin')}
 
@@ -2270,26 +2041,6 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                 <div class="card" style="background:rgba(255,255,255,0.02); box-shadow:none;">
                     <div class="muted">{signal['explanation']}</div>
                 </div>
-
-
-                <div class="section-title">Alert History</div>
-                <table>
-                    <tr>
-                        <th>Zeit</th>
-                        <th>Market</th>
-                        <th>Symbol</th>
-                        <th>Alert</th>
-                        <th>Severity</th>
-                        <th>Signal</th>
-                        <th>Status</th>
-                        <th>Score</th>
-                        <th>Entry</th>
-                        <th>SL</th>
-                        <th>TP1</th>
-                        <th>TP2</th>
-                    </tr>
-                    {alert_table_rows if alert_table_rows else "<tr><td colspan='12'>Keine Alerts</td></tr>"}
-                </table>
 
                 <div class="section-title">Signal History</div>
                 <table>
