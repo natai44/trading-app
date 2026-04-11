@@ -3,3 +3,4 @@ uvicorn
 requests
 numpy
 opencv-python-headless
+python-multipart
