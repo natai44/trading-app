@@ -319,31 +319,6 @@ def now_iso():
     return datetime.utcnow().isoformat()
 
 
-def table_columns(cur, table_name: str):
-    cur.execute(f"PRAGMA table_info({table_name})")
-    return [row["name"] for row in cur.fetchall()]
-
-
-def add_column_if_missing(cur, table_name: str, column_name: str, definition: str):
-    if column_name not in table_columns(cur, table_name):
-        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
-
-
-def short_device_name(request: Request) -> str:
-    ua = (request.headers.get("user-agent") or "Unknown device")[:120]
-    return ua
-
-
-def ensure_device_id(request: Request) -> str:
-    return request.cookies.get("device_id") or str(uuid.uuid4())
-
-
-def attach_device_cookie(response, request: Request):
-    device_id = ensure_device_id(request)
-    response.set_cookie("device_id", device_id, httponly=True, samesite="lax", max_age=60*60*24*365)
-    return response
-
-
 def init_db():
     conn = db_conn()
     cur = conn.cursor()
@@ -411,29 +386,11 @@ def init_db():
         )
     """)
 
-    for col, definition in [
-        ("device_id", "TEXT"),
-        ("device_name", "TEXT"),
-        ("password_setup_code", "TEXT"),
-        ("must_set_password", "INTEGER NOT NULL DEFAULT 0"),
-    ]:
-        add_column_if_missing(cur, "users", col, definition)
-
-    for col, definition in [
-        ("device_id", "TEXT"),
-    ]:
-        add_column_if_missing(cur, "sessions", col, definition)
-
-    for col, definition in [
-        ("approval_code", "TEXT"),
-    ]:
-        add_column_if_missing(cur, "access_requests", col, definition)
-
     cur.execute("SELECT * FROM users WHERE username = ?", (DEFAULT_ADMIN_USERNAME,))
     if not cur.fetchone():
         cur.execute("""
-            INSERT INTO users (username, email, password, role, active, created_at, must_set_password)
-            VALUES (?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO users (username, email, password, role, active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             DEFAULT_ADMIN_USERNAME,
             DEFAULT_ADMIN_EMAIL,
@@ -446,8 +403,8 @@ def init_db():
     cur.execute("SELECT * FROM users WHERE username = ?", (DEFAULT_USER_USERNAME,))
     if not cur.fetchone():
         cur.execute("""
-            INSERT INTO users (username, email, password, role, active, created_at, must_set_password)
-            VALUES (?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO users (username, email, password, role, active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             DEFAULT_USER_USERNAME,
             DEFAULT_USER_EMAIL,
@@ -497,7 +454,6 @@ def get_user(username: str):
 
 def get_current_user(request: Request):
     session_token = request.cookies.get("session_token")
-    device_id = ensure_device_id(request)
     if not session_token:
         return None
 
@@ -509,10 +465,6 @@ def get_current_user(request: Request):
         conn.close()
         return None
 
-    if session_row["device_id"] and session_row["device_id"] != device_id:
-        conn.close()
-        return None
-
     cur.execute("SELECT * FROM users WHERE username = ?", (session_row["username"],))
     user = cur.fetchone()
     conn.close()
@@ -520,16 +472,11 @@ def get_current_user(request: Request):
     if not user or int(user["active"]) != 1:
         return None
 
-    if user["device_id"] and user["device_id"] != device_id:
-        return None
-
     return {
         "username": user["username"],
         "email": user["email"],
         "role": user["role"],
-        "active": bool(user["active"]),
-        "device_name": user["device_name"],
-        "must_set_password": int(user["must_set_password"]),
+        "active": bool(user["active"])
     }
 
 
@@ -544,14 +491,13 @@ def require_admin(request: Request):
     return user
 
 
-def create_session(username: str, device_id: str):
+def create_session(username: str):
     token = str(uuid.uuid4())
     conn = db_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM sessions WHERE username = ?", (username,))
     cur.execute(
-        "INSERT INTO sessions (token, username, created_at, device_id) VALUES (?, ?, ?, ?)",
-        (token, username, now_iso(), device_id)
+        "INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)",
+        (token, username, now_iso())
     )
     conn.commit()
     conn.close()
@@ -581,7 +527,7 @@ def topbar(lang: str, user=None, show_profile=True, show_admin=False):
         admin_link = f'<a class="chip" href="/admin?lang={lang}">Admin</a>' if show_admin else ""
         auth = f"""
         <div class="actions">
-            <span class="chip">{tr(lang, "Eingeloggt als", "Logged in as")}: <b>{user['username']}</b> ({user['role']})</span><span class="chip">{tr(lang, 'Geraet', 'Device')}: {user.get('device_name') or '-'}</span>
+            <span class="chip">{tr(lang, "Eingeloggt als", "Logged in as")}: <b>{user['username']}</b> ({user['role']})</span>
             {profile_link}
             {admin_link}
             <a class="chip" href="/logout?lang={lang}">{tr(lang, "Logout", "Logout")}</a>
@@ -627,20 +573,9 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
     if not TWELVE_DATA_API_KEY:
         raise ValueError("Twelve Data API Key fehlt")
 
-    raw_symbol = symbol.strip().upper()
-    symbol_map = {
-        "EUR/USD": "EUR/USD", "GBP/USD": "GBP/USD", "USD/JPY": "USD/JPY", "USD/CHF": "USD/CHF",
-        "AUD/USD": "AUD/USD", "NZD/USD": "NZD/USD", "USD/CAD": "USD/CAD",
-        "XAU/USD": "XAU/USD", "XAG/USD": "XAG/USD",
-        "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY", "USDCHF": "USD/CHF",
-        "AUDUSD": "AUD/USD", "NZDUSD": "NZD/USD", "USDCAD": "USD/CAD",
-        "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD",
-    }
-    api_symbol = symbol_map.get(raw_symbol, raw_symbol)
-
     url = "https://api.twelvedata.com/time_series"
     params = {
-        "symbol": api_symbol,
+        "symbol": symbol.upper().strip(),
         "interval": interval,
         "outputsize": outputsize,
         "apikey": TWELVE_DATA_API_KEY,
@@ -652,7 +587,7 @@ def get_forex_or_gold_candles(symbol: str = "XAU/USD", interval: str = "5min", o
     data = r.json()
 
     if "values" not in data or not data["values"]:
-        raise ValueError(data.get("message", f"Forex/Gold-Daten konnten nicht geladen werden: {api_symbol}"))
+        raise ValueError(data.get("message", "Forex/Gold-Daten konnten nicht geladen werden"))
 
     values = list(reversed(data["values"]))
     candles = []
@@ -1328,18 +1263,16 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request, lang: str = "de", error: str = "", msg: str = ""):
+def login_page(lang: str = "de", error: str = "", msg: str = ""):
     error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
 
     body = f"""
     {topbar(lang)}
 
-    <div class="login-wrap" style="max-width:760px;">
+    <div class="login-wrap">
         <div class="card">
-            <h1>{tr(lang, "Willkommen", "Welcome")}</h1>
-            <div class="hero-sub">{tr(lang, "Schone Trading Web App mit Login, Zugangsanfrage und Geraetebindung.", "Beautiful trading web app with login, access request and device binding.")}</div>
-            <div style="height:14px;"></div>
+            <h1>{tr(lang, "Login", "Login")}</h1>
             {error_html}
             {msg_html}
             <form method="post" action="/login">
@@ -1357,52 +1290,29 @@ def login_page(request: Request, lang: str = "de", error: str = "", msg: str = "
 
             <div style="height:14px;"></div>
             <a class="btn btn-secondary" href="/request-access?lang={lang}">{tr(lang, "Zugang anfragen", "Request access")}</a>
-            <a class="btn btn-secondary" href="/activate-account?lang={lang}" style="margin-left:10px;">{tr(lang, "Passwort selbst setzen", "Set your own password")}</a>
 
             <div class="footer-note">
-                {tr(lang, "Neue Nutzer: erst Zugang anfragen, dann nach Freigabe eigenes Passwort setzen.", "New users: first request access, then after approval set your own password.")}<br>
-                {tr(lang, "Ein Account wird beim ersten erfolgreichen Login an ein Geraet gebunden. Das reduziert Teilen, ist aber auf einer Web-App nicht 100% perfekt.", "An account is bound to one device on first successful login. This reduces sharing, but on a web app it is not 100% perfect.")}
+                Admin: admin / admin123<br>
+                User: user / user123
             </div>
         </div>
     </div>
     """
-    response = HTMLResponse(page("Login", body))
-    return attach_device_cookie(response, request)
+    return page("Login", body)
 
 
 @app.post("/login")
-def login_submit(request: Request, username: str = Form(...), password: str = Form(...), lang: str = Form("de")):
+def login_submit(username: str = Form(...), password: str = Form(...), lang: str = Form("de")):
     user = get_user(username)
-    device_id = ensure_device_id(request)
     if not user or user["password"] != password or int(user["active"]) != 1:
         return RedirectResponse(
             url=f"/login?lang={lang}&error={tr(lang, 'Login fehlgeschlagen', 'Login failed')}",
             status_code=303
         )
-
-    if int(user["must_set_password"]) == 1:
-        return RedirectResponse(
-            url=f"/activate-account?lang={lang}&msg={tr(lang, 'Bitte erst eigenes Passwort setzen', 'Please set your own password first')}&username={username}",
-            status_code=303
-        )
-
-    if user["device_id"] and user["device_id"] != device_id:
-        return RedirectResponse(
-            url=f"/login?lang={lang}&error={tr(lang, 'Dieser Zugang ist bereits an ein anderes Geraet gebunden', 'This account is already bound to another device')}",
-            status_code=303
-        )
-
-    conn = db_conn()
-    cur = conn.cursor()
-    if not user["device_id"]:
-        cur.execute("UPDATE users SET device_id = ?, device_name = ? WHERE username = ?", (device_id, short_device_name(request), username))
-    conn.commit()
-    conn.close()
-
-    token = create_session(username, device_id)
+    token = create_session(username)
     response = RedirectResponse(url=f"/?lang={lang}", status_code=303)
-    response.set_cookie("session_token", token, httponly=True, samesite="lax")
-    return attach_device_cookie(response, request)
+    response.set_cookie("session_token", token, httponly=True)
+    return response
 
 
 @app.get("/logout")
@@ -1434,7 +1344,7 @@ def profile_page(request: Request, lang: str = "de", msg: str = ""):
             <div class="info-item"><div class="info-label">{tr(lang, "Benutzername", "Username")}</div><div class="info-value">{user['username']}</div></div>
             <div class="info-item"><div class="info-label">Email</div><div class="info-value">{user['email'] or ''}</div></div>
             <div class="info-item"><div class="info-label">{tr(lang, "Rolle", "Role")}</div><div class="info-value">{user['role']}</div></div>
-            <div class="info-item"><div class="info-label">Status</div><div class="info-value">active</div></div><div class="info-item"><div class="info-label">{tr(lang, 'Gebundenes Geraet', 'Bound device')}</div><div class="info-value">{user.get('device_name') or '-'}</div></div>
+            <div class="info-item"><div class="info-label">Status</div><div class="info-value">active</div></div>
         </div>
 
         <div class="section-title">{tr(lang, "Email aendern", "Change email")}</div>
@@ -1494,58 +1404,6 @@ def change_password(request: Request, old_password: str = Form(...), new_passwor
     return RedirectResponse(url=f"/profile?lang={lang}&msg={tr(lang, 'Passwort geaendert', 'Password changed')}", status_code=303)
 
 
-@app.get("/activate-account", response_class=HTMLResponse)
-def activate_account_page(request: Request, lang: str = "de", msg: str = "", error: str = "", username: str = ""):
-    msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
-    error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
-    body = f"""
-    {topbar(lang)}
-    <div class="login-wrap" style="max-width:700px;">
-        <div class="card">
-            <a class="chip" href="/login?lang={lang}">⬅ {tr(lang, "Zurueck zum Login", "Back to login")}</a>
-            <h1 style="margin-top:18px;">{tr(lang, "Eigenes Passwort setzen", "Set your own password")}</h1>
-            <div class="hero-sub">{tr(lang, "Nach Admin-Freigabe setzt jeder Nutzer hier sein eigenes Passwort. Beim ersten erfolgreichen Speichern wird der Account an dieses Geraet gebunden.", "After admin approval each user sets their own password here. On first successful save, the account is bound to this device.")}</div>
-            <div style="height:14px;"></div>
-            {msg_html}
-            {error_html}
-            <form method="post" action="/activate-account">
-                <input type="hidden" name="lang" value="{lang}">
-                <div class="form-row"><label>{tr(lang, "Benutzername", "Username")}</label><input name="username" value="{username}"></div>
-                <div class="form-row"><label>{tr(lang, "Freigabe-Code", "Approval code")}</label><input name="approval_code"></div>
-                <div class="form-row"><label>{tr(lang, "Neues Passwort", "New password")}</label><input type="password" name="new_password"></div>
-                <button class="btn" type="submit">{tr(lang, "Passwort setzen", "Set password")}</button>
-            </form>
-        </div>
-    </div>
-    """
-    response = HTMLResponse(page("Activate Account", body))
-    return attach_device_cookie(response, request)
-
-
-@app.post("/activate-account")
-def activate_account_submit(request: Request, username: str = Form(...), approval_code: str = Form(...), new_password: str = Form(...), lang: str = Form("de")):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE username = ?", (username.strip(),))
-    user = cur.fetchone()
-    if not user:
-        conn.close()
-        return RedirectResponse(url=f"/activate-account?lang={lang}&error={tr(lang, 'Nutzer nicht gefunden', 'User not found')}", status_code=303)
-
-    if (user["password_setup_code"] or "") != approval_code.strip() or int(user["must_set_password"] or 0) != 1:
-        conn.close()
-        return RedirectResponse(url=f"/activate-account?lang={lang}&error={tr(lang, 'Code ungueltig oder nicht freigegeben', 'Invalid code or not approved')}&username={username}", status_code=303)
-
-    device_id = ensure_device_id(request)
-    cur.execute(
-        "UPDATE users SET password = ?, must_set_password = 0, password_setup_code = NULL, device_id = ?, device_name = ? WHERE username = ?",
-        (new_password.strip(), device_id, short_device_name(request), username.strip())
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url=f"/login?lang={lang}&msg={tr(lang, 'Passwort gesetzt. Jetzt einloggen.', 'Password set. Now log in.')}", status_code=303)
-
-
 @app.get("/request-access", response_class=HTMLResponse)
 def request_access_page(lang: str = "de", msg: str = ""):
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
@@ -1556,15 +1414,13 @@ def request_access_page(lang: str = "de", msg: str = ""):
             <a class="chip" href="/login?lang={lang}">⬅ {tr(lang, "Zurueck zum Login", "Back to login")}</a>
             <h1 style="margin-top:18px;">{tr(lang, "Zugang anfragen", "Request access")}</h1>
             {msg_html}
-            <div class="hero-sub">{tr(lang, "Nach Freigabe setzt jeder Nutzer sein eigenes Passwort selbst.", "After approval each user sets their own password themselves.")}</div>
-            <div style="height:12px;"></div>
             <form method="post" action="/request-access">
                 <input type="hidden" name="lang" value="{lang}">
                 <div class="form-row"><label>{tr(lang, "Name", "Name")}</label><input name="name"></div>
                 <div class="form-row"><label>Email</label><input name="email"></div>
                 <div class="form-row"><label>{tr(lang, "Gewuenschter Benutzername", "Desired username")}</label><input name="desired_username"></div>
                 <div class="form-row"><label>{tr(lang, "Nachricht", "Message")}</label><textarea name="message"></textarea></div>
-                <button class="btn" type="submit">{tr(lang, "Anfrage senden", "Send request")}</button><a class="btn btn-secondary" href="/request-status?lang={lang}" style="margin-left:10px;">{tr(lang, "Anfrage Status", "Request status")}</a>
+                <button class="btn" type="submit">{tr(lang, "Anfrage senden", "Send request")}</button>
             </form>
         </div>
     </div>
@@ -1588,53 +1444,6 @@ def request_access_submit(name: str = Form(...), email: str = Form(...), desired
     conn.commit()
     conn.close()
     return RedirectResponse(url=f"/login?lang={lang}&msg={tr(lang, 'Anfrage gesendet', 'Request sent')}", status_code=303)
-
-
-@app.get("/request-status", response_class=HTMLResponse)
-def request_status_page(request: Request, lang: str = "de", msg: str = "", error: str = ""):
-    msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
-    error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
-    body = f"""
-    {topbar(lang)}
-    <div class="login-wrap" style="max-width:700px;">
-        <div class="card">
-            <a class="chip" href="/login?lang={lang}">⬅ {tr(lang, "Zurueck zum Login", "Back to login")}</a>
-            <h1 style="margin-top:18px;">{tr(lang, "Anfrage Status", "Request status")}</h1>
-            {msg_html}
-            {error_html}
-            <form method="post" action="/request-status">
-                <input type="hidden" name="lang" value="{lang}">
-                <div class="form-row"><label>Email</label><input name="email"></div>
-                <div class="form-row"><label>{tr(lang, "Gewuenschter Benutzername", "Desired username")}</label><input name="desired_username"></div>
-                <button class="btn" type="submit">{tr(lang, "Pruefen", "Check")}</button>
-            </form>
-        </div>
-    </div>
-    """
-    response = HTMLResponse(page("Request Status", body))
-    return attach_device_cookie(response, request)
-
-
-@app.post("/request-status", response_class=HTMLResponse)
-def request_status_submit(request: Request, email: str = Form(...), desired_username: str = Form(...), lang: str = Form("de")):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM access_requests WHERE email = ? AND desired_username = ? ORDER BY created_at DESC LIMIT 1",
-        (email.strip(), desired_username.strip())
-    )
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return RedirectResponse(url=f"/request-status?lang={lang}&error={tr(lang, 'Keine Anfrage gefunden', 'No request found')}", status_code=303)
-
-    if row["status"] == "approved":
-        msg = f"{tr(lang, 'Freigegeben. Nutzer:', 'Approved. User:')} {row['created_username']} | {tr(lang, 'Code:', 'Code:')} {row['approval_code'] or '-'}"
-        return RedirectResponse(url=f"/activate-account?lang={lang}&msg={msg}&username={row['created_username']}", status_code=303)
-    elif row["status"] == "rejected":
-        return RedirectResponse(url=f"/request-status?lang={lang}&error={tr(lang, 'Anfrage wurde abgelehnt', 'Request was rejected')}", status_code=303)
-    else:
-        return RedirectResponse(url=f"/request-status?lang={lang}&msg={tr(lang, 'Noch in Pruefung', 'Still pending')}", status_code=303)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1676,8 +1485,7 @@ def admin_page(request: Request, lang: str = "de", msg: str = ""):
             <td>{u['email'] or ''}</td>
             <td>{u['role']}</td>
             <td>{'active' if int(u['active']) == 1 else 'inactive'}</td>
-            <td>{u['device_name'] or ''}</td>
-            <td>{actions}<form method="post" action="/admin/reset-device" style="display:inline; margin-left:8px;"><input type="hidden" name="lang" value="{lang}"><input type="hidden" name="username" value="{u['username']}"><button class="btn btn-secondary" type="submit">{tr(lang, 'Geraet reset', 'Reset device')}</button></form></td>
+            <td>{actions}</td>
         </tr>
         """
 
@@ -1707,7 +1515,7 @@ def admin_page(request: Request, lang: str = "de", msg: str = ""):
             <td>{r['message'] or ''}</td>
             <td>{r['status']}</td>
             <td>{r['created_username'] or ''}</td>
-            <td>{r['approval_code'] or ''}</td>
+            <td>{r['created_password'] or ''}</td>
             <td>{actions}</td>
         </tr>
         """
@@ -1721,13 +1529,13 @@ def admin_page(request: Request, lang: str = "de", msg: str = ""):
 
         <div class="section-title">{tr(lang, "Anfrage History", "Request history")}</div>
         <table>
-            <tr><th>Name</th><th>Email</th><th>Desired Username</th><th>Message</th><th>Status</th><th>Created User</th><th>Code</th><th>Action</th></tr>
+            <tr><th>Name</th><th>Email</th><th>Desired Username</th><th>Message</th><th>Status</th><th>Created User</th><th>Password</th><th>Action</th></tr>
             {req_rows if req_rows else "<tr><td colspan='8'>Keine Requests</td></tr>"}
         </table>
 
         <div class="section-title">{tr(lang, "Aktive Nutzer", "Active users")}</div>
         <table>
-            <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Device</th><th>Action</th></tr>
+            <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Action</th></tr>
             {user_rows}
         </table>
     </div>
@@ -1755,34 +1563,21 @@ def admin_approve_request(request: Request, request_id: str = Form(...), lang: s
     if exists:
         username = f"{username}_{r['id']}"
 
-    approval_code = secrets.token_hex(3).upper()
-    cur.execute(
-        "INSERT INTO users (username, email, password, role, active, created_at, must_set_password, password_setup_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (username, r["email"], "PENDING", "user", 1, now_iso(), 1, approval_code)
-    )
+    password = generate_password()
+    cur.execute("""
+        INSERT INTO users (username, email, password, role, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (username, r["email"], password, "user", 1, now_iso()))
 
-    cur.execute(
-        "UPDATE access_requests SET status = ?, created_username = ?, created_password = ?, approval_code = ?, decided_at = ? WHERE id = ?",
-        ("approved", username, "SELF-SET", approval_code, now_iso(), request_id)
-    )
+    cur.execute("""
+        UPDATE access_requests
+        SET status = ?, created_username = ?, created_password = ?, decided_at = ?
+        WHERE id = ?
+    """, ("approved", username, password, now_iso(), request_id))
 
     conn.commit()
     conn.close()
-    return RedirectResponse(url=f"/admin?lang={lang}&msg={tr(lang, 'Freigegeben. Nutzer setzt eigenes Passwort mit Code.', 'Approved. User sets own password with code.')}", status_code=303)
-
-
-@app.post("/admin/reset-device")
-def admin_reset_device(request: Request, username: str = Form(...), lang: str = Form("de")):
-    admin = require_admin(request)
-    if not admin:
-        return RedirectResponse(url=f"/login?lang={lang}", status_code=303)
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET device_id = NULL, device_name = NULL WHERE username = ?", (username,))
-    cur.execute("DELETE FROM sessions WHERE username = ?", (username,))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url=f"/admin?lang={lang}&msg={tr(lang, 'Geraetebindung geloescht', 'Device binding cleared')}", status_code=303)
+    return RedirectResponse(url=f"/admin?lang={lang}&msg=User erstellt", status_code=303)
 
 
 @app.post("/admin/reject-request")
