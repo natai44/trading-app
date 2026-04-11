@@ -828,6 +828,7 @@ def combine_bias(mtf):
 
 def evaluate_signal_engine(mtf):
     m5 = mtf["M5"]["analysis"]
+    m15 = mtf["M15"]["analysis"]
     h1 = mtf["H1"]["analysis"]
     h4 = mtf["H4"]["analysis"]
     d1 = mtf["D1"]["analysis"]
@@ -847,48 +848,111 @@ def evaluate_signal_engine(mtf):
     reasons = []
 
     # -------------------------------------------------
-    # BUY ZONE IMMER SICHTBAR
+    # BUY / SELL ZONES ALWAYS VISIBLE
     # -------------------------------------------------
     buy_zone_low = min(last_day_low + day_range * 0.10, h1["support"])
     buy_zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
     buy_prep_entry = (buy_zone_low + buy_zone_high) / 2
 
-    buy_sl = last_h1_low
-    buy_tp_medium = last_h1_high
-    buy_tp_large = last_day_high
-
-    buy_risk = buy_prep_entry - buy_sl
-    if buy_risk <= 0:
-        buy_risk = max(m5["atr"] * 1.2, abs(buy_prep_entry) * 0.001)
-
-    buy_tp1 = buy_prep_entry + buy_risk * 1.0
-    buy_tp2 = buy_prep_entry + buy_risk * 1.5
-
-    # -------------------------------------------------
-    # SELL ZONE IMMER SICHTBAR
-    # -------------------------------------------------
     sell_zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
     sell_zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
     sell_prep_entry = (sell_zone_low + sell_zone_high) / 2
+
+    # -------------------------------------------------
+    # MAIN RULES FROM USER
+    # -------------------------------------------------
+    buy_sl = last_h1_low
+    buy_tp_medium = last_h1_high
+    buy_tp_large = last_day_high
 
     sell_sl = last_h1_high
     sell_tp_medium = last_h1_low
     sell_tp_large = last_day_low
 
+    buy_risk = buy_prep_entry - buy_sl
+    if buy_risk <= 0:
+        buy_risk = max(m5["atr"] * 1.2, abs(buy_prep_entry) * 0.001)
+
     sell_risk = sell_sl - sell_prep_entry
     if sell_risk <= 0:
         sell_risk = max(m5["atr"] * 1.2, abs(sell_prep_entry) * 0.001)
+
+    buy_tp1 = buy_prep_entry + buy_risk * 1.0
+    buy_tp2 = buy_prep_entry + buy_risk * 1.5
 
     sell_tp1 = sell_prep_entry - sell_risk * 1.0
     sell_tp2 = sell_prep_entry - sell_risk * 1.5
 
     # -------------------------------------------------
-    # BUY / SELL SCORES
+    # 5M PREPARATION
+    # -------------------------------------------------
+    m5_possible_side = "WAIT"
+    m5_entry = current_price
+    m5_sl = None
+    m5_tp1 = None
+    m5_tp2 = None
+    m5_status = "NO 5M MOVE"
+
+    if m5["trend"] == "BULLISH":
+        m5_possible_side = "BUY"
+        m5_sl = last_h1_low
+        m5_risk = max(m5_entry - m5_sl, m5["atr"] * 1.2, 1e-9)
+        m5_tp1 = m5_entry + m5_risk * 1.0
+        m5_tp2 = m5_entry + m5_risk * 1.5
+        m5_status = "5M BUY PREPARATION"
+
+        if m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH":
+            m5_status = "5M BUY ENTRY READY"
+
+    elif m5["trend"] == "BEARISH":
+        m5_possible_side = "SELL"
+        m5_sl = last_h1_high
+        m5_risk = max(m5_sl - m5_entry, m5["atr"] * 1.2, 1e-9)
+        m5_tp1 = m5_entry - m5_risk * 1.0
+        m5_tp2 = m5_entry - m5_risk * 1.5
+        m5_status = "5M SELL PREPARATION"
+
+        if m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH":
+            m5_status = "5M SELL ENTRY READY"
+
+    # -------------------------------------------------
+    # 15M PREPARATION
+    # -------------------------------------------------
+    m15_possible_side = "WAIT"
+    m15_entry = current_price
+    m15_sl = None
+    m15_tp1 = None
+    m15_tp2 = None
+    m15_status = "NO 15M MOVE"
+
+    if m15["trend"] == "BULLISH":
+        m15_possible_side = "BUY"
+        m15_sl = last_h1_low
+        m15_risk = max(m15_entry - m15_sl, m15["atr"] * 1.2, 1e-9)
+        m15_tp1 = m15_entry + m15_risk * 1.0
+        m15_tp2 = m15_entry + m15_risk * 1.5
+        m15_status = "15M BUY PREPARATION"
+
+        if m15["bos"] == "BULLISH BOS" or m15["choch"] == "BULLISH CHOCH":
+            m15_status = "15M BUY ENTRY READY"
+
+    elif m15["trend"] == "BEARISH":
+        m15_possible_side = "SELL"
+        m15_sl = last_h1_high
+        m15_risk = max(m15_sl - m15_entry, m15["atr"] * 1.2, 1e-9)
+        m15_tp1 = m15_entry - m15_risk * 1.0
+        m15_tp2 = m15_entry - m15_risk * 1.5
+        m15_status = "15M SELL PREPARATION"
+
+        if m15["bos"] == "BEARISH BOS" or m15["choch"] == "BEARISH CHOCH":
+            m15_status = "15M SELL ENTRY READY"
+
+    # -------------------------------------------------
+    # MAIN BUY / SELL SCORES
     # -------------------------------------------------
     buy_score = 0
     sell_score = 0
 
-    # D1 / H1 / H4 direction
     if d1["trend"] == "BULLISH":
         buy_score += 20
     elif d1["trend"] == "BEARISH":
@@ -904,13 +968,11 @@ def evaluate_signal_engine(mtf):
     elif h4["trend"] == "BEARISH":
         sell_score += 10
 
-    # Today open relation
     if current_price > today_open:
         buy_score += 5
     elif current_price < today_open:
         sell_score += 5
 
-    # Premium / Discount
     if current_price <= m5["discount_zone"]:
         buy_score += 10
         reasons.append("Preis liegt in/nahe Discount Zone -> Buy Seite interessanter.")
@@ -918,30 +980,6 @@ def evaluate_signal_engine(mtf):
         sell_score += 10
         reasons.append("Preis liegt in/nahe Premium Zone -> Sell Seite interessanter.")
 
-    # Liquidity relation
-    if current_price < m5["buy_side_liquidity"]:
-        buy_score += 3
-    if current_price > m5["sell_side_liquidity"]:
-        sell_score += 3
-
-    # M5 trigger only for better entry
-    buy_trigger = (
-        m5["trend"] == "BULLISH"
-        and (m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH")
-    )
-    sell_trigger = (
-        m5["trend"] == "BEARISH"
-        and (m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH")
-    )
-
-    if buy_trigger:
-        buy_score += 12
-        reasons.append("5m bestaetigt moeglichen Buy Entry.")
-    if sell_trigger:
-        sell_score += 12
-        reasons.append("5m bestaetigt moeglichen Sell Entry.")
-
-    # Zone proximity
     if buy_zone_low <= current_price <= buy_zone_high:
         buy_score += 18
         reasons.append("Preis ist in der Buy Zone.")
@@ -962,6 +1000,16 @@ def evaluate_signal_engine(mtf):
         sell_score += 4
         reasons.append("Preis ist ueber der Sell Zone, Reaktion spaeter moeglich.")
 
+    if m5_possible_side == "BUY":
+        buy_score += 5
+    elif m5_possible_side == "SELL":
+        sell_score += 5
+
+    if m15_possible_side == "BUY":
+        buy_score += 8
+    elif m15_possible_side == "SELL":
+        sell_score += 8
+
     # -------------------------------------------------
     # PREFERRED SIDE
     # -------------------------------------------------
@@ -975,8 +1023,8 @@ def evaluate_signal_engine(mtf):
     # -------------------------------------------------
     # FINAL MAIN SIGNAL
     # -------------------------------------------------
-    signal_type = "MARKET STRUCTURE READY"
-    signal_status = "WATCH ZONES"
+    signal_type = "BOTH ZONES VISIBLE"
+    signal_status = "WAIT - WATCH BUY & SELL ZONES"
 
     entry_price = None
     sl_price = None
@@ -990,60 +1038,53 @@ def evaluate_signal_engine(mtf):
     if preferred_side == "BUY":
         zone_low = buy_zone_low
         zone_high = buy_zone_high
-        entry_price = current_price if buy_trigger else buy_prep_entry
+        entry_price = buy_prep_entry
         sl_price = buy_sl
-        tp1 = buy_tp1 if not buy_trigger else entry_price + max(entry_price - sl_price, m5["atr"] * 1.2) * 1.0
-        tp2 = buy_tp2 if not buy_trigger else entry_price + max(entry_price - sl_price, m5["atr"] * 1.2) * 1.5
+        tp1 = buy_tp1
+        tp2 = buy_tp2
         tp_medium = buy_tp_medium
         tp_large = buy_tp_large
 
-        if buy_trigger:
-            signal_type = "BUY 5M SETUP"
-            signal_status = "ENTRY POSSIBLE"
-        elif buy_zone_low <= current_price <= buy_zone_high:
+        signal_type = "BUY SIDE PREPARATION"
+        signal_status = "WATCH BUY ZONE"
+
+        if buy_zone_low <= current_price <= buy_zone_high:
             signal_type = "BUY ZONE ACTIVE"
             signal_status = "WAIT REACTION / CONFIRMATION"
-        else:
-            signal_type = "BUY SIDE PREPARATION"
-            signal_status = "WATCH BUY ZONE"
+
+        if m5_status == "5M BUY ENTRY READY":
+            signal_type = "BUY 5M SETUP"
+            signal_status = "ENTRY POSSIBLE"
 
     elif preferred_side == "SELL":
         zone_low = sell_zone_low
         zone_high = sell_zone_high
-        entry_price = current_price if sell_trigger else sell_prep_entry
+        entry_price = sell_prep_entry
         sl_price = sell_sl
-        tp1 = sell_tp1 if not sell_trigger else entry_price - max(sl_price - entry_price, m5["atr"] * 1.2) * 1.0
-        tp2 = sell_tp2 if not sell_trigger else entry_price - max(sl_price - entry_price, m5["atr"] * 1.2) * 1.5
+        tp1 = sell_tp1
+        tp2 = sell_tp2
         tp_medium = sell_tp_medium
         tp_large = sell_tp_large
 
-        if sell_trigger:
-            signal_type = "SELL 5M SETUP"
-            signal_status = "ENTRY POSSIBLE"
-        elif sell_zone_low <= current_price <= sell_zone_high:
+        signal_type = "SELL SIDE PREPARATION"
+        signal_status = "WATCH SELL ZONE"
+
+        if sell_zone_low <= current_price <= sell_zone_high:
             signal_type = "SELL ZONE ACTIVE"
             signal_status = "WAIT REACTION / CONFIRMATION"
-        else:
-            signal_type = "SELL SIDE PREPARATION"
-            signal_status = "WATCH SELL ZONE"
 
-    else:
-        # show a neutral preparation instead of only "no clear zone"
-        zone_low = None
-        zone_high = None
-        signal_type = "BOTH ZONES VISIBLE"
-        signal_status = "WAIT - WATCH BUY & SELL ZONES"
+        if m5_status == "5M SELL ENTRY READY":
+            signal_type = "SELL 5M SETUP"
+            signal_status = "ENTRY POSSIBLE"
 
     explanation = " | ".join(reasons)
 
     return {
-        # main side
         "signal_type": signal_type,
         "signal_status": signal_status,
         "signal_score": max(buy_score, sell_score),
         "preferred_side": preferred_side,
 
-        # main displayed setup
         "prep_price": entry_price,
         "trigger_price": current_price,
         "entry_price": entry_price,
@@ -1055,7 +1096,6 @@ def evaluate_signal_engine(mtf):
         "zone_low": zone_low,
         "zone_high": zone_high,
 
-        # shared levels
         "last_day_high": last_day_high,
         "last_day_low": last_day_low,
         "last_h1_high": last_h1_high,
@@ -1083,11 +1123,25 @@ def evaluate_signal_engine(mtf):
         "sell_tp_medium": sell_tp_medium,
         "sell_tp_large": sell_tp_large,
 
+        # 5m preparation
+        "m5_possible_side": m5_possible_side,
+        "m5_status": m5_status,
+        "m5_entry": m5_entry,
+        "m5_sl": m5_sl,
+        "m5_tp1": m5_tp1,
+        "m5_tp2": m5_tp2,
+
+        # 15m preparation
+        "m15_possible_side": m15_possible_side,
+        "m15_status": m15_status,
+        "m15_entry": m15_entry,
+        "m15_sl": m15_sl,
+        "m15_tp1": m15_tp1,
+        "m15_tp2": m15_tp2,
+
         "explanation": explanation,
-        "timeframe_note": "Both zones always visible | D1 + H1 = main direction | 5m = entry confirmation only",
+        "timeframe_note": "D1 + H1 = main direction | 15m = medium preparation | 5m = fast preparation / entry",
     }
-
-
 
 def get_latest_signal(market: str, symbol: str):
     conn = db_conn()
@@ -1841,6 +1895,124 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                     <div class="info-item"><div class="info-label">Last H1 High</div><div class="info-value">{format_price(signal['last_h1_high'])}</div></div>
                     <div class="info-item"><div class="info-label">Last H1 Low</div><div class="info-value">{format_price(signal['last_h1_low'])}</div></div>
                 </div>
+<div class="section-title">Both Zones / Possible Moves</div>
+<div class="info-list">
+    <div class="info-item">
+        <div class="info-label">Preferred Side</div>
+        <div class="info-value">{signal['preferred_side']}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">Main Signal</div>
+        <div class="info-value">{signal['signal_type']}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">BUY Score</div>
+        <div class="info-value">{signal['buy_score']}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SELL Score</div>
+        <div class="info-value">{signal['sell_score']}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">BUY Zone</div>
+        <div class="info-value">{format_price(signal['buy_zone_low'])} - {format_price(signal['buy_zone_high'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SELL Zone</div>
+        <div class="info-value">{format_price(signal['sell_zone_low'])} - {format_price(signal['sell_zone_high'])}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">BUY Entry Prep</div>
+        <div class="info-value">{format_price(signal['buy_entry'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SELL Entry Prep</div>
+        <div class="info-value">{format_price(signal['sell_entry'])}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">BUY SL</div>
+        <div class="info-value">{format_price(signal['buy_sl'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SELL SL</div>
+        <div class="info-value">{format_price(signal['sell_sl'])}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">BUY TP1 / TP2</div>
+        <div class="info-value">{format_price(signal['buy_tp1'])} / {format_price(signal['buy_tp2'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SELL TP1 / TP2</div>
+        <div class="info-value">{format_price(signal['sell_tp1'])} / {format_price(signal['sell_tp2'])}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">BUY TP Medium / Large</div>
+        <div class="info-value">{format_price(signal['buy_tp_medium'])} / {format_price(signal['buy_tp_large'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">SELL TP Medium / Large</div>
+        <div class="info-value">{format_price(signal['sell_tp_medium'])} / {format_price(signal['sell_tp_large'])}</div>
+    </div>
+</div>
+
+<div class="section-title">5m / 15m Move Preparation</div>
+<div class="info-list">
+    <div class="info-item">
+        <div class="info-label">5m Side</div>
+        <div class="info-value">{signal['m5_possible_side']}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">5m Status</div>
+        <div class="info-value">{signal['m5_status']}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">5m Entry</div>
+        <div class="info-value">{format_price(signal['m5_entry'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">5m SL</div>
+        <div class="info-value">{format_price(signal['m5_sl'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">5m TP1</div>
+        <div class="info-value">{format_price(signal['m5_tp1'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">5m TP2</div>
+        <div class="info-value">{format_price(signal['m5_tp2'])}</div>
+    </div>
+
+    <div class="info-item">
+        <div class="info-label">15m Side</div>
+        <div class="info-value">{signal['m15_possible_side']}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">15m Status</div>
+        <div class="info-value">{signal['m15_status']}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">15m Entry</div>
+        <div class="info-value">{format_price(signal['m15_entry'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">15m SL</div>
+        <div class="info-value">{format_price(signal['m15_sl'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">15m TP1</div>
+        <div class="info-value">{format_price(signal['m15_tp1'])}</div>
+    </div>
+    <div class="info-item">
+        <div class="info-label">15m TP2</div>
+        <div class="info-value">{format_price(signal['m15_tp2'])}</div>
+    </div>
+</div>
 
                 <div class="section-title">Signal Erklaerung</div>
                 <div class="card" style="background:rgba(255,255,255,0.02); box-shadow:none;">
