@@ -2,7 +2,7 @@ import time
 import requests
 
 # 🔥 DEIN TELEGRAM (NEUEN TOKEN HIER EINFÜGEN!)
-TELEGRAM_BOT_TOKEN = "8785866877"
+TELEGRAM_BOT_TOKEN = ""
 TELEGRAM_CHAT_ID = "1080439188"
 
 # 🔄 API (gleich wie in main.py)
