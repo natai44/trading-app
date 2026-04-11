@@ -1309,29 +1309,35 @@ def get_signal_history(market: str, symbol: str, limit: int = 12):
     return rows
 
 
+
 def draw_chart(candles, analysis, signal, symbol: str, market: str):
     width = 1420
     height = 1030
     chart_top = 70
-    chart_bottom = 430
+    chart_bottom = 500
     left_pad = 70
     right_pad = 30
 
     img = np.zeros((height, width, 3), dtype=np.uint8)
     img[:] = (11, 14, 20)
 
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
+    # show fewer candles so bodies stay visible
+    view_candles = candles[-80:] if len(candles) > 80 else candles
+    highs = [c["high"] for c in view_candles]
+    lows = [c["low"] for c in view_candles]
 
     extra_prices = list(highs + lows)
     for p in [
-        signal["zone_low"], signal["zone_high"], signal["entry_price"], signal["sl_price"],
-        signal["tp1"], signal["tp2"], signal["tp_medium"], signal["tp_large"],
-        signal["last_day_high"], signal["last_day_low"],
-        signal["last_h1_high"], signal["last_h1_low"],
-        analysis["buy_side_liquidity"], analysis["sell_side_liquidity"],
-        analysis["support"], analysis["resistance"],
-        analysis["premium_zone"], analysis["discount_zone"]
+        signal.get("zone_low"), signal.get("zone_high"),
+        signal.get("entry_price"), signal.get("sl_price"),
+        signal.get("tp1"), signal.get("tp2"),
+        signal.get("tp_medium"), signal.get("tp_large"),
+        signal.get("last_day_high"), signal.get("last_day_low"),
+        signal.get("last_h1_high"), signal.get("last_h1_low"),
+        signal.get("fib_50"), signal.get("fib_618"), signal.get("fib_786"),
+        analysis.get("buy_side_liquidity"), analysis.get("sell_side_liquidity"),
+        analysis.get("support"), analysis.get("resistance"),
+        analysis.get("premium_zone"), analysis.get("discount_zone"),
     ]:
         if p is not None:
             extra_prices.append(p)
@@ -1344,10 +1350,10 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         usable_h = chart_bottom - chart_top
         return int(chart_bottom - ((price - min_price) / price_range) * usable_h)
 
-    n = len(candles)
+    n = len(view_candles)
     usable_w = width - left_pad - right_pad
-    candle_step = max(usable_w // max(n, 1), 8)
-    candle_w = max(4, candle_step // 2)
+    candle_step = max(usable_w // max(n, 1), 12)
+    candle_w = max(6, min(14, candle_step - 3))
 
     overlay = img.copy()
 
@@ -1356,20 +1362,25 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
     cv2.rectangle(overlay, (left_pad, y_premium), (width - right_pad, chart_bottom), (20, 60, 20), -1)
     cv2.rectangle(overlay, (left_pad, chart_top), (width - right_pad, y_discount), (80, 20, 20), -1)
 
-    if signal["zone_low"] is not None and signal["zone_high"] is not None:
-        zy_top = price_to_y(signal["zone_high"])
-        zy_bottom = price_to_y(signal["zone_low"])
-        zone_color = (0, 110, 0) if "BUY" in signal["signal_type"] else (0, 0, 110) if "SELL" in signal["signal_type"] else (70, 70, 70)
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), zone_color, -1)
+    if signal.get("buy_zone_low") is not None and signal.get("buy_zone_high") is not None:
+        zy_top = price_to_y(signal["buy_zone_high"])
+        zy_bottom = price_to_y(signal["buy_zone_low"])
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (0, 70, 0), -1)
 
-    cv2.addWeighted(overlay, 0.10, img, 0.90, 0, img)
+    if signal.get("sell_zone_low") is not None and signal.get("sell_zone_high") is not None:
+        zy_top = price_to_y(signal["sell_zone_high"])
+        zy_bottom = price_to_y(signal["sell_zone_low"])
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (70, 0, 0), -1)
 
-    for i in range(6):
-        y = chart_top + int((chart_bottom - chart_top) * i / 5)
+    cv2.addWeighted(overlay, 0.12, img, 0.88, 0, img)
+
+    for i in range(7):
+        y = chart_top + int((chart_bottom - chart_top) * i / 6)
         cv2.line(img, (left_pad, y), (width - right_pad, y), (45, 50, 60), 1)
 
-    for i, c in enumerate(candles):
-        x = left_pad + i * candle_step
+    # real candles
+    for i, c in enumerate(view_candles):
+        x = left_pad + i * candle_step + candle_step // 2
         y_open = price_to_y(c["open"])
         y_close = price_to_y(c["close"])
         y_high = price_to_y(c["high"])
@@ -1381,46 +1392,42 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         cv2.line(img, (x, y_high), (x, y_low), color, 1)
         top = min(y_open, y_close)
         bottom = max(y_open, y_close)
-        if bottom == top:
-            bottom += 1
+        if bottom - top < 4:
+            bottom = top + 4
         cv2.rectangle(img, (x - candle_w // 2, top), (x + candle_w // 2, bottom), color, -1)
 
     levels = [
-        ("LAST D HIGH", signal["last_day_high"], (255, 255, 255)),
-        ("LAST D LOW", signal["last_day_low"], (220, 220, 220)),
-        ("LAST H1 HIGH", signal["last_h1_high"], (255, 170, 170)),
-        ("LAST H1 LOW", signal["last_h1_low"], (170, 220, 255)),
-        ("BSL", analysis["buy_side_liquidity"], (255, 120, 0)),
-        ("SSL", analysis["sell_side_liquidity"], (180, 0, 255)),
-        ("SUPPORT", analysis["support"], (120, 200, 255)),
-        ("RESIST", analysis["resistance"], (255, 80, 80)),
-        ("PREMIUM", analysis["premium_zone"], (160, 120, 255)),
-        ("DISCOUNT", analysis["discount_zone"], (80, 255, 180)),
+        ("LAST D HIGH", signal.get("last_day_high"), (255, 255, 255)),
+        ("LAST D LOW", signal.get("last_day_low"), (220, 220, 220)),
+        ("LAST H1 HIGH", signal.get("last_h1_high"), (255, 170, 170)),
+        ("LAST H1 LOW", signal.get("last_h1_low"), (170, 220, 255)),
+        ("FIB 0.5", signal.get("fib_50"), (255, 220, 120)),
+        ("FIB 0.618", signal.get("fib_618"), (255, 200, 80)),
+        ("FIB 0.786", signal.get("fib_786"), (255, 180, 40)),
+        ("BSL", analysis.get("buy_side_liquidity"), (255, 120, 0)),
+        ("SSL", analysis.get("sell_side_liquidity"), (180, 0, 255)),
+        ("SUPPORT", analysis.get("support"), (120, 200, 255)),
+        ("RESIST", analysis.get("resistance"), (255, 80, 80)),
+        ("PREMIUM", analysis.get("premium_zone"), (160, 120, 255)),
+        ("DISCOUNT", analysis.get("discount_zone"), (80, 255, 180)),
     ]
 
-    if analysis["eq_high"] is not None:
-        levels.append(("EQH", analysis["eq_high"], (250, 250, 250)))
-    if analysis["eq_low"] is not None:
-        levels.append(("EQL", analysis["eq_low"], (210, 210, 210)))
-
-    if signal["zone_low"] is not None:
-        levels.append(("ZONE LOW", signal["zone_low"], (0, 255, 120)))
-    if signal["zone_high"] is not None:
-        levels.append(("ZONE HIGH", signal["zone_high"], (0, 255, 120)))
-    if signal["entry_price"] is not None:
+    if signal.get("entry_price") is not None:
         levels.append(("ENTRY", signal["entry_price"], (0, 255, 0)))
-    if signal["sl_price"] is not None:
+    if signal.get("sl_price") is not None:
         levels.append(("SL", signal["sl_price"], (0, 0, 255)))
-    if signal["tp1"] is not None:
+    if signal.get("tp1") is not None:
         levels.append(("TP1", signal["tp1"], (0, 255, 255)))
-    if signal["tp2"] is not None:
+    if signal.get("tp2") is not None:
         levels.append(("TP2", signal["tp2"], (255, 220, 0)))
-    if signal["tp_medium"] is not None:
+    if signal.get("tp_medium") is not None:
         levels.append(("TP MED", signal["tp_medium"], (255, 180, 0)))
-    if signal["tp_large"] is not None:
+    if signal.get("tp_large") is not None:
         levels.append(("TP LARGE", signal["tp_large"], (255, 140, 0)))
 
     for label, price, color in levels:
+        if price is None:
+            continue
         y = price_to_y(price)
         cv2.line(img, (left_pad, y), (width - right_pad, y), color, 1)
         cv2.putText(img, f"{label}: {format_price(price)}", (left_pad + 10, y - 6),
@@ -1428,7 +1435,7 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
     cv2.putText(
         img,
-        f"{market.upper()} | {symbol.upper()} | Signal: {signal['signal_type']} | Trend M5: {analysis['trend']} | BOS: {analysis['bos']} | CHOCH: {analysis['choch']}",
+        f"{market.upper()} | {symbol.upper()} | Signal: {signal.get('signal_type', '')} | Trend M5: {analysis.get('trend', '')} | BOS: {analysis.get('bos', '')} | CHOCH: {analysis.get('choch', '')}",
         (25, 35),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.58,
@@ -1436,30 +1443,32 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         2
     )
 
-    cv2.rectangle(img, (0, 470), (width, height), (20, 24, 30), -1)
-    cv2.line(img, (0, 470), (width, 470), (0, 255, 120), 2)
+    cv2.rectangle(img, (0, 540), (width, height), (20, 24, 30), -1)
+    cv2.line(img, (0, 540), (width, 540), (0, 255, 120), 2)
 
     info_lines = [
-        f"Signal: {signal['signal_type']} | Status: {signal['signal_status']}",
-        f"Zone: {format_price(signal['zone_low'])} - {format_price(signal['zone_high'])}",
-        f"Entry: {format_price(signal['entry_price'])} | SL: {format_price(signal['sl_price'])}",
-        f"TP1: {format_price(signal['tp1'])} | TP2: {format_price(signal['tp2'])}",
-        f"TP Medium: {format_price(signal['tp_medium'])} | TP Large: {format_price(signal['tp_large'])}",
-        f"Last D High/Low: {format_price(signal['last_day_high'])} / {format_price(signal['last_day_low'])}",
-        f"Last H1 High/Low: {format_price(signal['last_h1_high'])} / {format_price(signal['last_h1_low'])}",
-        f"Trend: {analysis['trend']} | BOS: {analysis['bos']} | CHOCH: {analysis['choch']}",
-        f"Liquidity: {format_price(analysis['buy_side_liquidity'])} / {format_price(analysis['sell_side_liquidity'])}",
-        f"Support / Resistance: {format_price(analysis['support'])} / {format_price(analysis['resistance'])}",
-        f"FVG: {analysis['fvg_text']}",
-        f"Premium / Discount: {format_price(analysis['premium_zone'])} / {format_price(analysis['discount_zone'])}",
+        f"Signal: {signal.get('signal_type', '-')} | Status: {signal.get('signal_status', '-')}",
+        f"Buy Zone: {format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}",
+        f"Sell Zone: {format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}",
+        f"Entry: {format_price(signal.get('entry_price'))} | SL: {format_price(signal.get('sl_price'))}",
+        f"TP1: {format_price(signal.get('tp1'))} | TP2: {format_price(signal.get('tp2'))}",
+        f"TP Medium: {format_price(signal.get('tp_medium'))} | TP Large: {format_price(signal.get('tp_large'))}",
+        f"Fib 0.5 / 0.618 / 0.786: {format_price(signal.get('fib_50'))} / {format_price(signal.get('fib_618'))} / {format_price(signal.get('fib_786'))}",
+        f"Last D High/Low: {format_price(signal.get('last_day_high'))} / {format_price(signal.get('last_day_low'))}",
+        f"Last H1 High/Low: {format_price(signal.get('last_h1_high'))} / {format_price(signal.get('last_h1_low'))}",
+        f"Trend: {analysis.get('trend')} | BOS: {analysis.get('bos')} | CHOCH: {analysis.get('choch')}",
+        f"Liquidity: {format_price(analysis.get('buy_side_liquidity'))} / {format_price(analysis.get('sell_side_liquidity'))}",
+        f"Support / Resistance: {format_price(analysis.get('support'))} / {format_price(analysis.get('resistance'))}",
+        f"FVG: {analysis.get('fvg_text', '-')}",
     ]
 
-    y = 505
+    y = 575
     for line in info_lines:
         cv2.putText(img, line[:155], (25, y), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (235, 235, 235), 1)
         y += 24
 
     return img
+
 
 
 @app.get("/login", response_class=HTMLResponse)
