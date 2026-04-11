@@ -15,8 +15,8 @@ app = FastAPI(title="Trading Mentor App Final")
 DB_PATH = "app.db"
 TWELVE_DATA_API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
 
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123"
+DEFAULT_ADMIN_USERNAME = "mainname"
+DEFAULT_ADMIN_PASSWORD = "meinGeheimesPasswort123"
 DEFAULT_ADMIN_EMAIL = "abdisanatai@gmail.com"
 
 DEFAULT_USER_USERNAME = "user"
