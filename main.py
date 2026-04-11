@@ -1397,16 +1397,19 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         cv2.rectangle(img, (x - candle_w // 2, top), (x + candle_w // 2, bottom), color, -1)
 
     levels = [
-        levels = [
-    ("LAST H1 HIGH", signal.get("last_h1_high"), (255, 170, 170)),
-    ("LAST H1 LOW", signal.get("last_h1_low"), (170, 220, 255)),
-
-    ("FIB 0.618", signal.get("fib_618"), (255, 200, 80)),
-
-    ("ENTRY", signal.get("entry_price"), (0, 255, 0)),
-    ("SL", signal.get("sl_price"), (0, 0, 255)),
-    ("TP1", signal.get("tp1"), (0, 255, 255)),
-]
+        ("LAST D HIGH", signal.get("last_day_high"), (255, 255, 255)),
+        ("LAST D LOW", signal.get("last_day_low"), (220, 220, 220)),
+        ("LAST H1 HIGH", signal.get("last_h1_high"), (255, 170, 170)),
+        ("LAST H1 LOW", signal.get("last_h1_low"), (170, 220, 255)),
+        ("FIB 0.5", signal.get("fib_50"), (255, 220, 120)),
+        ("FIB 0.618", signal.get("fib_618"), (255, 200, 80)),
+        ("FIB 0.786", signal.get("fib_786"), (255, 180, 40)),
+        ("BSL", analysis.get("buy_side_liquidity"), (255, 120, 0)),
+        ("SSL", analysis.get("sell_side_liquidity"), (180, 0, 255)),
+        ("SUPPORT", analysis.get("support"), (120, 200, 255)),
+        ("RESIST", analysis.get("resistance"), (255, 80, 80)),
+        ("PREMIUM", analysis.get("premium_zone"), (160, 120, 255)),
+        ("DISCOUNT", analysis.get("discount_zone"), (80, 255, 180)),
     ]
 
     if signal.get("entry_price") is not None:
