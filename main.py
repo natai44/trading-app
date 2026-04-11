@@ -1959,8 +1959,9 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         <div class="grid grid-main">
             <div class="card">
+                <div class="section-title">Market Chart</div>
                 <div class="image-frame">
-                    <img src="data:image/png;base64,{img_b64}">
+                    <img src="data:image/png;base64,{img_b64}" alt="Market Chart" style="width:100%; height:auto; display:block;">
                 </div>
 
                 <div class="section-title">Signal Center</div>
@@ -1983,7 +1984,16 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                 </div>
 
                 
-                <div class="section-title">Smart Money Confluence / Fibonacci</div>
+                
+                <div class="section-title">Fibonacci Levels</div>
+                <div class="info-list">
+                    <div class="info-item"><div class="info-label">Fib 0.5</div><div class="info-value">{format_price(signal['fib_50'])}</div></div>
+                    <div class="info-item"><div class="info-label">Fib 0.618</div><div class="info-value">{format_price(signal['fib_618'])}</div></div>
+                    <div class="info-item"><div class="info-label">Fib 0.786</div><div class="info-value">{format_price(signal['fib_786'])}</div></div>
+                    <div class="info-item"><div class="info-label">Based On</div><div class="info-value">Last H1 High / Last H1 Low</div></div>
+                </div>
+
+<div class="section-title">Smart Money Confluence / Fibonacci</div>
                 <div class="info-list">
                     <div class="info-item"><div class="info-label">Preferred Side</div><div class="info-value">{signal['preferred_side']}</div></div>
                     <div class="info-item"><div class="info-label">Session</div><div class="info-value">{signal['session_name']}</div></div>
