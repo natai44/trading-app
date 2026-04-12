@@ -2,9 +2,8 @@ import time
 import requests
 from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
 
-# WICHTIG:
-# Alten Telegram Token bei BotFather widerrufen und hier den NEUEN einsetzen.
-TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
+TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw
+"
 TELEGRAM_CHAT_ID = "1080439188"
 
 SCAN_SYMBOLS = [
@@ -12,19 +11,25 @@ SCAN_SYMBOLS = [
     ("forex", "XAU/USD"),
 ]
 
-ALERT_COOLDOWN_SECONDS = 900  # 15 Minuten pro Symbol/Signal
+ALERT_COOLDOWN_SECONDS = 900
 SCAN_INTERVAL_SECONDS = 90
 
 LAST_ALERTS = {}
 
 
 def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PUT_YOUR_NEW_TELEGRAM_TOKEN_HERE":
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "HIER_DEIN_NEUER_TELEGRAM_TOKEN":
         print("Telegram token fehlt.")
         return
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
+        response = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            timeout=8,
+        )
+        print("Telegram status:", response.status_code, response.text)
     except Exception as exc:
         print("Telegram send error:", exc)
 
@@ -88,12 +93,12 @@ def run_once():
             print(f"{symbol} -> {signal['signal_type']} | score={signal['signal_score']} | preferred={signal['preferred_side']}")
             maybe_send_alert(market, symbol, signal)
         except Exception as exc:
-            err = f"Worker error on {symbol}: {exc}"
-            print(err)
+            print(f"Worker error on {symbol}: {exc}")
 
 
 def main():
     print("Alert worker started. Symbols: BTCUSDT and XAU/USD")
+    send_telegram_message("✅ Worker gestartet")
     while True:
         run_once()
         time.sleep(SCAN_INTERVAL_SECONDS)
