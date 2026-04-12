@@ -4,4 +4,3 @@ requests
 numpy
 opencv-python-headless
 python-multipart
-python-telegram-bot
