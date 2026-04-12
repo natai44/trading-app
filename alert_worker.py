@@ -1,118 +1,103 @@
 import time
 import requests
+from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
 
-# 🔥 DEIN TELEGRAM (NEUEN TOKEN HIER EINFÜGEN!)
-TELEGRAM_BOT_TOKEN = ""
+# WICHTIG:
+# Alten Telegram Token bei BotFather widerrufen und hier den NEUEN einsetzen.
+TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
 TELEGRAM_CHAT_ID = "1080439188"
 
-# 🔄 API (gleich wie in main.py)
-TWELVE_DATA_API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
+SCAN_SYMBOLS = [
+    ("crypto", "BTCUSDT"),
+    ("forex", "XAU/USD"),
+]
 
-# ⏱ Cooldown gegen Spam
+ALERT_COOLDOWN_SECONDS = 900  # 15 Minuten pro Symbol/Signal
+SCAN_INTERVAL_SECONDS = 90
+
 LAST_ALERTS = {}
-COOLDOWN = 900  # 15 Minuten
 
 
-# 📊 Daten holen
-def get_data(symbol):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": "5min",
-        "outputsize": 50,
-        "apikey": TWELVE_DATA_API_KEY,
-    }
-
-    r = requests.get(url, params=params)
-    data = r.json()
-
-    if "values" not in data:
-        return None
-
-    candles = list(reversed(data["values"]))
-    closes = [float(c["close"]) for c in candles]
-
-    return closes
-
-
-# 📈 einfache Logik (stabil & sicher)
-def analyze(symbol):
-    closes = get_data(symbol)
-    if not closes:
-        return None
-
-    current = closes[-1]
-    sma_fast = sum(closes[-5:]) / 5
-    sma_slow = sum(closes[-20:]) / 20
-
-    if sma_fast > sma_slow:
-        trend = "BUY"
-    elif sma_fast < sma_slow:
-        trend = "SELL"
-    else:
-        trend = "NONE"
-
-    return {
-        "trend": trend,
-        "price": current
-    }
-
-
-# 📩 Telegram senden
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+def send_telegram_message(text: str):
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PUT_YOUR_NEW_TELEGRAM_TOKEN_HERE":
+        print("Telegram token fehlt.")
+        return
     try:
-        requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg
-        })
-    except:
-        pass
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
+    except Exception as exc:
+        print("Telegram send error:", exc)
 
 
-# 🚨 Alert Logik
-def check_alert(symbol):
-    data = analyze(symbol)
-    if not data:
+def build_message(market: str, symbol: str, signal: dict) -> str:
+    return (
+        f"{signal['signal_type']}\n"
+        f"Market: {market.upper()} | Symbol: {symbol}\n"
+        f"Preferred: {signal['preferred_side']} | Score: {signal['signal_score']}\n"
+        f"Buy Zone: {format_price(signal['buy_zone_low'])} - {format_price(signal['buy_zone_high'])}\n"
+        f"Sell Zone: {format_price(signal['sell_zone_low'])} - {format_price(signal['sell_zone_high'])}\n"
+        f"Entry: {format_price(signal['entry_price'])}\n"
+        f"SL: {format_price(signal['sl_price'])}\n"
+        f"TP1 / TP2: {format_price(signal['tp1'])} / {format_price(signal['tp2'])}\n"
+        f"TP M / L: {format_price(signal['tp_medium'])} / {format_price(signal['tp_large'])}\n"
+        f"Fib 0.618: {format_price(signal['fib_618'])}\n"
+        f"Session: {signal['session_name']}"
+    )
+
+
+def get_alert_type(signal: dict):
+    signal_type = signal.get("signal_type", "")
+    score = float(signal.get("signal_score", 0) or 0)
+
+    if signal_type == "BUY ENTRY READY" and score >= 55:
+        return "BUY_ENTRY_READY"
+    if signal_type == "SELL ENTRY READY" and score >= 55:
+        return "SELL_ENTRY_READY"
+    if signal_type == "BUY ZONE ACTIVE" and score >= 45:
+        return "BUY_ZONE_ACTIVE"
+    if signal_type == "SELL ZONE ACTIVE" and score >= 45:
+        return "SELL_ZONE_ACTIVE"
+    return None
+
+
+def maybe_send_alert(market: str, symbol: str, signal: dict):
+    alert_type = get_alert_type(signal)
+    if not alert_type:
+        print(f"No strong alert for {symbol}: {signal.get('signal_type')} score={signal.get('signal_score')}")
         return
 
-    trend = data["trend"]
-    price = data["price"]
-
-    key = f"{symbol}_{trend}"
+    key = f"{market}:{symbol}:{alert_type}"
     now = time.time()
+    last_sent = LAST_ALERTS.get(key, 0)
 
-    if key in LAST_ALERTS:
-        if now - LAST_ALERTS[key] < COOLDOWN:
-            return
+    if now - last_sent < ALERT_COOLDOWN_SECONDS:
+        print(f"Cooldown active for {key}")
+        return
 
-    if trend == "BUY":
-        msg = f"🚀 BUY SIGNAL\n{symbol}\nPrice: {price}"
-        send_telegram(msg)
-        LAST_ALERTS[key] = now
-
-    elif trend == "SELL":
-        msg = f"🔥 SELL SIGNAL\n{symbol}\nPrice: {price}"
-        send_telegram(msg)
-        LAST_ALERTS[key] = now
+    msg = build_message(market, symbol, signal)
+    send_telegram_message(msg)
+    LAST_ALERTS[key] = now
+    print(f"Alert sent: {key}")
 
 
-# 🔁 MAIN LOOP
-def run():
-    while True:
+def run_once():
+    for market, symbol in SCAN_SYMBOLS:
         try:
-            print("Scanning...")
+            mtf = get_multi_timeframe_analysis(market, symbol)
+            signal = evaluate_signal_engine(mtf)
+            print(f"{symbol} -> {signal['signal_type']} | score={signal['signal_score']} | preferred={signal['preferred_side']}")
+            maybe_send_alert(market, symbol, signal)
+        except Exception as exc:
+            err = f"Worker error on {symbol}: {exc}"
+            print(err)
 
-            # 🔥 NUR BTC + GOLD
-            check_alert("BTCUSDT")
-            check_alert("XAU/USD")
 
-            time.sleep(60)  # jede 60 Sekunden
-
-        except Exception as e:
-            print("Error:", e)
-            time.sleep(60)
+def main():
+    print("Alert worker started. Symbols: BTCUSDT and XAU/USD")
+    while True:
+        run_once()
+        time.sleep(SCAN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    run()
+    main()
