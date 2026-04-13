@@ -2,8 +2,7 @@ import time
 import requests
 from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
 
-TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw
-"
+TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
 TELEGRAM_CHAT_ID = "1080439188"
 
 SCAN_SYMBOLS = [
