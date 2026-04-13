@@ -2,6 +2,7 @@ import json
 import time
 import requests
 from datetime import datetime, timezone
+from pathlib import Path
 
 from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
 
@@ -15,8 +16,8 @@ SCAN_SYMBOLS = [
 
 SCAN_INTERVAL_SECONDS = 90
 MAX_SIGNALS_PER_DAY = 2
-MIN_SIGNAL_GAP_SECONDS = 5400
-OPPOSITE_LOCK_SECONDS = 14400
+MIN_SIGNAL_GAP_SECONDS = 5400      # 90 min
+OPPOSITE_LOCK_SECONDS = 14400      # 4h
 MIN_AI_SCORE = 88
 STATE_FILE = "bot_state.json"
 
@@ -302,7 +303,6 @@ def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, t
     last_time = STATE["last_signal_time"].get(key, 0)
     last_side = STATE["last_signal_side"].get(key)
     last_score = STATE["last_signal_score"].get(key, 0)
-
     side = signal.get("preferred_side")
 
     if now_ts - last_time < MIN_SIGNAL_GAP_SECONDS:
