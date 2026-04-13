@@ -19,8 +19,8 @@ DEFAULT_ADMIN_USERNAME = "abdinata"
 DEFAULT_ADMIN_PASSWORD = "Nhatty1996#"
 DEFAULT_ADMIN_EMAIL = "abdisanatai@gmail.com"
 
-DEFAULT_USER_USERNAME = "user"
-DEFAULT_USER_PASSWORD = "user123"
+DEFAULT_USER_USERNAME = ""
+DEFAULT_USER_PASSWORD = ""
 DEFAULT_USER_EMAIL = "user@example.com"
 
 
@@ -637,6 +637,85 @@ def calculate_fibonacci(last_high, last_low):
     }
 
 
+def detect_magnet_zones(current_price, d1, h1, m15, m5, daily_info):
+    magnet_up_score = 0
+    magnet_down_score = 0
+    up_reasons = []
+    down_reasons = []
+
+    last_day_high = daily_info["last_day_high"]
+    last_day_low = daily_info["last_day_low"]
+    last_h1_high = h1["recent_high"]
+    last_h1_low = h1["recent_low"]
+
+    if current_price < last_day_high:
+        magnet_up_score += 12
+        up_reasons.append("Last Daily High above price")
+    if current_price > last_day_low:
+        magnet_down_score += 12
+        down_reasons.append("Last Daily Low below price")
+
+    if current_price < last_h1_high:
+        magnet_up_score += 10
+        up_reasons.append("Last H1 High above price")
+    if current_price > last_h1_low:
+        magnet_down_score += 10
+        down_reasons.append("Last H1 Low below price")
+
+    if current_price < m5["buy_side_liquidity"]:
+        magnet_up_score += 10
+        up_reasons.append("Buy-side liquidity above")
+    if current_price > m5["sell_side_liquidity"]:
+        magnet_down_score += 10
+        down_reasons.append("Sell-side liquidity below")
+
+    if m15.get("eq_high") and current_price < m15["eq_high"]:
+        magnet_up_score += 8
+        up_reasons.append("Equal highs above")
+    if m15.get("eq_low") and current_price > m15["eq_low"]:
+        magnet_down_score += 8
+        down_reasons.append("Equal lows below")
+
+    if h1.get("bullish_fvg") or m15.get("bullish_fvg"):
+        magnet_up_score += 6
+        up_reasons.append("Bullish FVG target")
+    if h1.get("bearish_fvg") or m15.get("bearish_fvg"):
+        magnet_down_score += 6
+        down_reasons.append("Bearish FVG target")
+
+    if h1.get("bullish_ob") or m15.get("bullish_ob"):
+        magnet_up_score += 5
+        up_reasons.append("Bullish order block active")
+    if h1.get("bearish_ob") or m15.get("bearish_ob"):
+        magnet_down_score += 5
+        down_reasons.append("Bearish order block active")
+
+    if magnet_up_score > magnet_down_score + 5:
+        stronger_magnet = "UP"
+    elif magnet_down_score > magnet_up_score + 5:
+        stronger_magnet = "DOWN"
+    else:
+        stronger_magnet = "BALANCED"
+
+    up_targets = [daily_info["last_day_high"], h1["recent_high"], m5["buy_side_liquidity"]]
+    down_targets = [daily_info["last_day_low"], h1["recent_low"], m5["sell_side_liquidity"]]
+
+    if m15.get("eq_high"):
+        up_targets.append(m15["eq_high"])
+    if m15.get("eq_low"):
+        down_targets.append(m15["eq_low"])
+
+    return {
+        "magnet_up_score": magnet_up_score,
+        "magnet_down_score": magnet_down_score,
+        "stronger_magnet": stronger_magnet,
+        "magnet_up_reason": " | ".join(up_reasons) if up_reasons else "-",
+        "magnet_down_reason": " | ".join(down_reasons) if down_reasons else "-",
+        "magnet_up_target": max(up_targets),
+        "magnet_down_target": min(down_targets),
+    }
+
+
 def detect_order_blocks(candles):
     bullish_ob = None
     bearish_ob = None
@@ -911,6 +990,7 @@ def combine_bias(mtf):
     return "MIXED / RANGE", "unklar oder Range"
 
 
+
 def evaluate_signal_engine(mtf):
     m5 = mtf["M5"]["analysis"]
     m15 = mtf["M15"]["analysis"]
@@ -927,20 +1007,38 @@ def evaluate_signal_engine(mtf):
     last_h1_high = h1["recent_high"]
     last_h1_low = h1["recent_low"]
     fib = calculate_fibonacci(last_h1_high, last_h1_low)
+    magnet = detect_magnet_zones(current_price, d1, h1, m15, m5, daily_info)
 
     reasons = []
-    day_range = max(last_day_high - last_day_low, h1["atr"], 1e-9)
 
-    # Main zones from previous logic remain
-    buy_zone_low = min(last_day_low + day_range * 0.10, h1["support"])
-    buy_zone_high = min(last_day_low + day_range * 0.28, h1["support"] + h1["atr"] * 0.50)
-    buy_entry = (buy_zone_low + buy_zone_high) / 2
+    current_abs = max(abs(current_price), 1e-9)
+    low_vol_market = (h1["atr"] / current_abs) < 0.0012
 
-    sell_zone_low = max(last_day_high - day_range * 0.28, h1["resistance"] - h1["atr"] * 0.50)
-    sell_zone_high = max(last_day_high - day_range * 0.10, h1["resistance"])
-    sell_entry = (sell_zone_low + sell_zone_high) / 2
+    raw_day_range = max(last_day_high - last_day_low, 1e-9)
+    if low_vol_market:
+        # Forex/Gold protection: keep strategy, but avoid microscopic zones/risk
+        day_range = max(raw_day_range, h1["atr"] * 6, m15["atr"] * 12, m5["atr"] * 20)
+        zone_half_floor = max(h1["atr"] * 1.2, m15["atr"] * 2.2, m5["atr"] * 3.5)
+        risk_floor = max(h1["atr"] * 1.8, m15["atr"] * 3.0, m5["atr"] * 4.5)
+        reasons.append("Low-vol Forex/Gold protection active.")
+    else:
+        day_range = max(raw_day_range, h1["atr"] * 3, m15["atr"] * 6)
+        zone_half_floor = max(h1["atr"] * 0.7, m15["atr"] * 1.4, m5["atr"] * 2.0)
+        risk_floor = max(h1["atr"] * 0.9, m15["atr"] * 1.6, m5["atr"] * 2.4)
 
-    # user rules
+    # Main zones visible both sides
+    buy_zone_center = min(last_day_low + day_range * 0.18, h1["support"])
+    sell_zone_center = max(last_day_high - day_range * 0.18, h1["resistance"])
+
+    buy_zone_low = buy_zone_center - zone_half_floor
+    buy_zone_high = buy_zone_center + zone_half_floor
+    sell_zone_low = sell_zone_center - zone_half_floor
+    sell_zone_high = sell_zone_center + zone_half_floor
+
+    buy_entry = max(last_day_low, buy_zone_center)
+    sell_entry = min(last_day_high, sell_zone_center)
+
+    # Your rules stay
     buy_sl = last_h1_low
     buy_tp_medium = last_h1_high
     buy_tp_large = last_day_high
@@ -949,15 +1047,14 @@ def evaluate_signal_engine(mtf):
     sell_tp_medium = last_h1_low
     sell_tp_large = last_day_low
 
-    buy_risk = max(buy_entry - buy_sl, m5["atr"] * 1.0, 1e-9)
-    sell_risk = max(sell_sl - sell_entry, m5["atr"] * 1.0, 1e-9)
+    buy_risk = max(buy_entry - buy_sl, risk_floor, 1e-9)
+    sell_risk = max(sell_sl - sell_entry, risk_floor, 1e-9)
 
     buy_tp1 = buy_entry + buy_risk * 1.0
     buy_tp2 = buy_entry + buy_risk * 1.5
     sell_tp1 = sell_entry - sell_risk * 1.0
     sell_tp2 = sell_entry - sell_risk * 1.5
 
-    # Smart money confluence
     buy_fvg = m5["bullish_fvg"] or m15["bullish_fvg"] or h1["bullish_fvg"]
     sell_fvg = m5["bearish_fvg"] or m15["bearish_fvg"] or h1["bearish_fvg"]
     buy_ob = h1["bullish_ob"] or m15["bullish_ob"] or m5["bullish_ob"]
@@ -968,10 +1065,10 @@ def evaluate_signal_engine(mtf):
     m5_sweep_sell = m5["upper_sweep"] or m15["upper_sweep"]
     m5_sweep_buy = m5["lower_sweep"] or m15["lower_sweep"]
 
-    # both 5m sides always visible
+    # 5m preparation both sides
     m5_buy_entry = current_price
     m5_buy_sl = last_h1_low
-    m5_buy_risk = max(m5_buy_entry - m5_buy_sl, m5["atr"] * 1.2, 1e-9)
+    m5_buy_risk = max(m5_buy_entry - m5_buy_sl, max(m5["atr"] * 2.0, risk_floor * 0.45), 1e-9)
     m5_buy_tp1 = m5_buy_entry + m5_buy_risk * 1.0
     m5_buy_tp2 = m5_buy_entry + m5_buy_risk * 1.5
     m5_buy_status = "5M BUY PREPARATION"
@@ -982,7 +1079,7 @@ def evaluate_signal_engine(mtf):
 
     m5_sell_entry = current_price
     m5_sell_sl = last_h1_high
-    m5_sell_risk = max(m5_sell_sl - m5_sell_entry, m5["atr"] * 1.2, 1e-9)
+    m5_sell_risk = max(m5_sell_sl - m5_sell_entry, max(m5["atr"] * 2.0, risk_floor * 0.45), 1e-9)
     m5_sell_tp1 = m5_sell_entry - m5_sell_risk * 1.0
     m5_sell_tp2 = m5_sell_entry - m5_sell_risk * 1.5
     m5_sell_status = "5M SELL PREPARATION"
@@ -991,10 +1088,10 @@ def evaluate_signal_engine(mtf):
     if m5["trend"] == "BEARISH" and (m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH"):
         m5_sell_status = "5M SELL ENTRY READY"
 
-    # both 15m sides always visible
+    # 15m preparation both sides
     m15_buy_entry = current_price
     m15_buy_sl = last_h1_low
-    m15_buy_risk = max(m15_buy_entry - m15_buy_sl, m15["atr"] * 1.2, 1e-9)
+    m15_buy_risk = max(m15_buy_entry - m15_buy_sl, max(m15["atr"] * 1.8, risk_floor * 0.55), 1e-9)
     m15_buy_tp1 = m15_buy_entry + m15_buy_risk * 1.0
     m15_buy_tp2 = m15_buy_entry + m15_buy_risk * 1.5
     m15_buy_status = "15M BUY PREPARATION"
@@ -1005,7 +1102,7 @@ def evaluate_signal_engine(mtf):
 
     m15_sell_entry = current_price
     m15_sell_sl = last_h1_high
-    m15_sell_risk = max(m15_sell_sl - m15_sell_entry, m15["atr"] * 1.2, 1e-9)
+    m15_sell_risk = max(m15_sell_sl - m15_sell_entry, max(m15["atr"] * 1.8, risk_floor * 0.55), 1e-9)
     m15_sell_tp1 = m15_sell_entry - m15_sell_risk * 1.0
     m15_sell_tp2 = m15_sell_entry - m15_sell_risk * 1.5
     m15_sell_status = "15M SELL PREPARATION"
@@ -1017,7 +1114,6 @@ def evaluate_signal_engine(mtf):
     buy_score = 0
     sell_score = 0
 
-    # keep daily/h1 checks
     if d1["trend"] == "BULLISH":
         buy_score += 20
         reasons.append("Last Daily trend bullish.")
@@ -1042,7 +1138,6 @@ def evaluate_signal_engine(mtf):
     elif current_price < today_open:
         sell_score += 5
 
-    # zone location
     if buy_zone_low <= current_price <= buy_zone_high:
         buy_score += 18
         reasons.append("Preis ist in/nahe Buy Zone.")
@@ -1050,7 +1145,6 @@ def evaluate_signal_engine(mtf):
         sell_score += 18
         reasons.append("Preis ist in/nahe Sell Zone.")
 
-    # fibonacci confluence
     if buy_zone_low <= fib["fib_618"] <= buy_zone_high or buy_zone_low <= fib["fib_786"] <= buy_zone_high:
         buy_score += 10
         reasons.append("Buy Zone + Fibonacci Confluence.")
@@ -1058,7 +1152,6 @@ def evaluate_signal_engine(mtf):
         sell_score += 10
         reasons.append("Sell Zone + Fibonacci Confluence.")
 
-    # FVG / OB
     if buy_fvg:
         buy_score += 8
         reasons.append("Bullish FVG vorhanden.")
@@ -1072,7 +1165,6 @@ def evaluate_signal_engine(mtf):
         sell_score += 8
         reasons.append("Bearish Order Block vorhanden.")
 
-    # sweeps
     if h1_sweep_buy or m5_sweep_buy:
         buy_score += 12
         reasons.append("Liquidity sweep unter Low -> Buy Reaction moeglich.")
@@ -1080,14 +1172,16 @@ def evaluate_signal_engine(mtf):
         sell_score += 12
         reasons.append("Liquidity sweep ueber High -> Sell Reaction moeglich.")
 
-    # entry accuracy from lower TF
-    if "READY" in m5_buy_status:
+    buy_score += max(0, magnet["magnet_up_score"] // 4)
+    sell_score += max(0, magnet["magnet_down_score"] // 4)
+
+    if "ENTRY READY" in m5_buy_status:
         buy_score += 10
-    if "READY" in m5_sell_status:
+    if "ENTRY READY" in m5_sell_status:
         sell_score += 10
-    if "READY" in m15_buy_status:
+    if "ENTRY READY" in m15_buy_status:
         buy_score += 7
-    if "READY" in m15_sell_status:
+    if "ENTRY READY" in m15_sell_status:
         sell_score += 7
 
     if buy_score > sell_score + 8:
@@ -1223,11 +1317,19 @@ def evaluate_signal_engine(mtf):
 
         "session_name": get_session_context(),
         "news_filter": "Manual check recommended before high-impact news",
+
+        "magnet_up_score": magnet["magnet_up_score"],
+        "magnet_down_score": magnet["magnet_down_score"],
+        "stronger_magnet": magnet["stronger_magnet"],
+        "magnet_up_reason": magnet["magnet_up_reason"],
+        "magnet_down_reason": magnet["magnet_down_reason"],
+        "magnet_up_target": magnet["magnet_up_target"],
+        "magnet_down_target": magnet["magnet_down_target"],
+        "market_volatility_mode": "LOW_VOL_FOREX_GOLD" if low_vol_market else "NORMAL",
+
         "explanation": explanation,
-        "timeframe_note": "D1 + H1 = main direction | 15m + 5m = both-side preparation | Fib + OB + FVG + Sweep = confluence",
+        "timeframe_note": "D1 + H1 = main direction | 15m + 5m = both-side preparation | Fib + OB + FVG + Sweep + Magnet = confluence",
     }
-
-
 
 def get_latest_signal(market: str, symbol: str):
     conn = db_conn()
@@ -1308,6 +1410,9 @@ def get_signal_history(market: str, symbol: str, limit: int = 12):
     conn.close()
     return rows
 
+
+
+
 def draw_chart(candles, analysis, signal, symbol: str, market: str):
     width = 1420
     height = 1030
@@ -1319,20 +1424,17 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
     img = np.zeros((height, width, 3), dtype=np.uint8)
     img[:] = (11, 14, 20)
 
-    # Für Forex/Gold weniger Kerzen anzeigen, damit sie sichtbar bleiben
+    # Analysis still uses full history; chart shows a readable zoom.
     if market == "forex":
-        view_candles = candles[-45:] if len(candles) > 45 else candles
+        view_candles = candles[-36:] if len(candles) > 36 else candles
     else:
         view_candles = candles[-80:] if len(candles) > 80 else candles
 
     highs = [c["high"] for c in view_candles]
     lows = [c["low"] for c in view_candles]
 
-    # WICHTIG:
-    # Chart-Skalierung nur aus Kerzen + Hauptlevels
-    # nicht aus allen Linien, sonst werden Forex-Kerzen winzig
+    # Scale only around the visible candles + a few critical levels.
     scale_prices = list(highs + lows)
-
     for p in [
         signal.get("last_h1_high"),
         signal.get("last_h1_low"),
@@ -1340,20 +1442,19 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         signal.get("sl_price"),
         signal.get("tp1"),
         signal.get("fib_618"),
+        signal.get("buy_zone_low"),
+        signal.get("buy_zone_high"),
+        signal.get("sell_zone_low"),
+        signal.get("sell_zone_high"),
     ]:
         if p is not None:
-            scale_prices.append(p)
+            scale_prices.append(float(p))
 
     max_price = max(scale_prices)
     min_price = min(scale_prices)
-
-    # Extra Padding, damit Kerzen oben/unten Luft haben
     price_range = max(max_price - min_price, 1e-9)
-    pad = price_range * 0.25
 
-    if market == "forex":
-        pad = max(pad, price_range * 0.35)
-
+    pad = price_range * (0.42 if market == "forex" else 0.25)
     max_price += pad
     min_price -= pad
     price_range = max(max_price - min_price, 1e-9)
@@ -1364,30 +1465,28 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
     n = len(view_candles)
     usable_w = width - left_pad - right_pad
-    candle_step = max(usable_w // max(n, 1), 14)
-    candle_w = max(8, min(16, candle_step - 3))
+    candle_step = max(usable_w // max(n, 1), 18 if market == "forex" else 12)
+    candle_w = max(10 if market == "forex" else 6, min(20, candle_step - 4))
 
     overlay = img.copy()
 
-    # Zonen nur leicht anzeigen
     if signal.get("buy_zone_low") is not None and signal.get("buy_zone_high") is not None:
         zy_top = price_to_y(signal["buy_zone_high"])
         zy_bottom = price_to_y(signal["buy_zone_low"])
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (0, 70, 0), -1)
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (0, 80, 0), -1)
 
     if signal.get("sell_zone_low") is not None and signal.get("sell_zone_high") is not None:
         zy_top = price_to_y(signal["sell_zone_high"])
         zy_bottom = price_to_y(signal["sell_zone_low"])
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (70, 0, 0), -1)
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (80, 0, 0), -1)
 
     cv2.addWeighted(overlay, 0.10, img, 0.90, 0, img)
 
-    # Grid
     for i in range(7):
         y = chart_top + int((chart_bottom - chart_top) * i / 6)
         cv2.line(img, (left_pad, y), (width - right_pad, y), (45, 50, 60), 1)
 
-    # Kerzen klar und dick zeichnen
+    # Real, thicker candles, especially for Forex/Gold
     for i, c in enumerate(view_candles):
         x = left_pad + i * candle_step + candle_step // 2
         y_open = price_to_y(c["open"])
@@ -1398,27 +1497,17 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         bullish = c["close"] >= c["open"]
         color = (0, 200, 120) if bullish else (0, 70, 255)
 
-        # Wick
         cv2.line(img, (x, y_high), (x, y_low), color, 2)
-
-        # Body
         top = min(y_open, y_close)
         bottom = max(y_open, y_close)
 
-        # Mindesthöhe für Body, damit Forex/Gold sichtbar bleibt
-        min_body = 8 if market == "forex" else 5
+        min_body = 10 if market == "forex" else 5
         if bottom - top < min_body:
             bottom = top + min_body
 
-        cv2.rectangle(
-            img,
-            (x - candle_w // 2, top),
-            (x + candle_w // 2, bottom),
-            color,
-            -1
-        )
+        cv2.rectangle(img, (x - candle_w // 2, top), (x + candle_w // 2, bottom), color, -1)
 
-    # Nur wichtigste Linien im Chart lassen
+    # Keep only important levels on chart so candles stay visible
     levels = [
         ("LAST H1 HIGH", signal.get("last_h1_high"), (255, 170, 170)),
         ("LAST H1 LOW", signal.get("last_h1_low"), (170, 220, 255)),
@@ -1433,31 +1522,18 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
             continue
         y = price_to_y(price)
         cv2.line(img, (left_pad, y), (width - right_pad, y), color, 1)
-        cv2.putText(
-            img,
-            f"{label}: {format_price(price)}",
-            (left_pad + 10, y - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            color,
-            1
-        )
+        cv2.putText(img, f"{label}: {format_price(price)}", (left_pad + 10, y - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 
-    cv2.putText(
-        img,
-        f"{market.upper()} | {symbol.upper()} | Signal: {signal.get('signal_type', '')}",
-        (25, 35),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (255, 255, 255),
-        2
-    )
+    cv2.putText(img, f"{market.upper()} | {symbol.upper()} | Signal: {signal.get('signal_type', '')}",
+                (25, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2)
 
     cv2.rectangle(img, (0, 540), (width, height), (20, 24, 30), -1)
     cv2.line(img, (0, 540), (width, 540), (0, 255, 120), 2)
 
     info_lines = [
         f"Signal: {signal.get('signal_type', '-')} | Status: {signal.get('signal_status', '-')}",
+        f"Volatility Mode: {signal.get('market_volatility_mode', '-')}",
         f"Buy Zone: {format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}",
         f"Sell Zone: {format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}",
         f"Entry: {format_price(signal.get('entry_price'))} | SL: {format_price(signal.get('sl_price'))}",
@@ -1479,9 +1555,6 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
     return img
 
-
-
-@app.get("/login", response_class=HTMLResponse)
 def login_page(lang: str = "de", error: str = "", msg: str = ""):
     error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
@@ -1978,9 +2051,8 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
 
         <div class="grid grid-main">
             <div class="card">
-                <div class="section-title">Market Chart</div>
                 <div class="image-frame">
-                    <img src="data:image/png;base64,{img_b64}" alt="Market Chart" style="width:100%; height:auto; display:block;">
+                    <img src="data:image/png;base64,{img_b64}">
                 </div>
 
                 <div class="section-title">Signal Center</div>
@@ -2003,16 +2075,7 @@ def analyze(request: Request, market: str, symbol: str, lang: str = "de"):
                 </div>
 
                 
-                
-                <div class="section-title">Fibonacci Levels</div>
-                <div class="info-list">
-                    <div class="info-item"><div class="info-label">Fib 0.5</div><div class="info-value">{format_price(signal['fib_50'])}</div></div>
-                    <div class="info-item"><div class="info-label">Fib 0.618</div><div class="info-value">{format_price(signal['fib_618'])}</div></div>
-                    <div class="info-item"><div class="info-label">Fib 0.786</div><div class="info-value">{format_price(signal['fib_786'])}</div></div>
-                    <div class="info-item"><div class="info-label">Based On</div><div class="info-value">Last H1 High / Last H1 Low</div></div>
-                </div>
-
-<div class="section-title">Smart Money Confluence / Fibonacci</div>
+                <div class="section-title">Smart Money Confluence / Fibonacci</div>
                 <div class="info-list">
                     <div class="info-item"><div class="info-label">Preferred Side</div><div class="info-value">{signal['preferred_side']}</div></div>
                     <div class="info-item"><div class="info-label">Session</div><div class="info-value">{signal['session_name']}</div></div>
