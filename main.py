@@ -927,6 +927,7 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
         tf_map = {
             "M5": "5m",
             "M15": "15m",
+            "M30": "30m",
             "H1": "1h",
             "H4": "4h",
             "D1": "1d",
@@ -937,6 +938,7 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
         tf_map = {
             "M5": "5min",
             "M15": "15min",
+            "M30": "30min",
             "H1": "1h",
             "H4": "4h",
             "D1": "1day",
@@ -1076,9 +1078,38 @@ def reaction_trigger_score(side: str, m5, m15, fib, magnet, current_price, buy_z
 
     return score, reasons
 
+
+def local_protective_stop(side: str, entry_price: float, m15: dict, m30: dict, m5: dict):
+    if side == "BUY":
+        candidates = [
+            m15["last_swing_low"],
+            m30["last_swing_low"],
+            m15["sell_side_liquidity"],
+            m30["sell_side_liquidity"],
+            m5["last_swing_low"],
+        ]
+        below = [x for x in candidates if x < entry_price]
+        if below:
+            return max(below)
+        return min(candidates)
+
+    candidates = [
+        m15["last_swing_high"],
+        m30["last_swing_high"],
+        m15["buy_side_liquidity"],
+        m30["buy_side_liquidity"],
+        m5["last_swing_high"],
+    ]
+    above = [x for x in candidates if x > entry_price]
+    if above:
+        return min(above)
+    return max(candidates)
+
+
 def evaluate_signal_engine(mtf):
     m5 = mtf["M5"]["analysis"]
     m15 = mtf["M15"]["analysis"]
+    m30 = mtf["M30"]["analysis"]
     h1 = mtf["H1"]["analysis"]
     h4 = mtf["H4"]["analysis"]
     d1 = mtf["D1"]["analysis"]
@@ -1117,11 +1148,13 @@ def evaluate_signal_engine(mtf):
     buy_entry = current_price
     sell_entry = current_price
 
-    buy_sl = min(m5["last_swing_low"], m15["last_swing_low"], m5["sell_side_liquidity"], m15["sell_side_liquidity"])
-    sell_sl = max(m5["last_swing_high"], m15["last_swing_high"], m5["buy_side_liquidity"], m15["buy_side_liquidity"])
+    # SL only from local 15m / 30m swing, rejection, liquidity
+    buy_sl = local_protective_stop("BUY", buy_entry, m15, m30, m5)
+    sell_sl = local_protective_stop("SELL", sell_entry, m15, m30, m5)
 
-    buy_risk = max(buy_entry - buy_sl, m15["atr"] * 1.2, m5["atr"] * 1.8, 1e-9)
-    sell_risk = max(sell_sl - sell_entry, m15["atr"] * 1.2, m5["atr"] * 1.8, 1e-9)
+    # keep stop local - no huge H1/D1 stops
+    buy_risk = max(buy_entry - buy_sl, m15["atr"] * 0.8, m5["atr"] * 1.2, 1e-9)
+    sell_risk = max(sell_sl - sell_entry, m15["atr"] * 0.8, m5["atr"] * 1.2, 1e-9)
 
     buy_tp1 = buy_entry + buy_risk * 1.0
     buy_tp2 = buy_entry + buy_risk * 1.5
@@ -1142,6 +1175,7 @@ def evaluate_signal_engine(mtf):
     reasons = [context_reason]
     reasons.append(f"BUY triggers: {', '.join(buy_triggers) if buy_triggers else 'none'}")
     reasons.append(f"SELL triggers: {', '.join(sell_triggers) if sell_triggers else 'none'}")
+    reasons.append("SL uses only 15m / 30m local swing + rejection + liquidity.")
 
     preferred_side = "WAIT"
     signal_type = "NO SIGNAL"
@@ -1270,8 +1304,9 @@ def evaluate_signal_engine(mtf):
         "session_name": get_session_context(),
         "news_filter": "Manual check recommended before high-impact news",
         "explanation": explanation,
-        "timeframe_note": "D1/H1 = context + zone + TP | 5m/15m = entry confirmation only",
+        "timeframe_note": "D1/H1 = context + zone + TP | 15m/30m = local stop | 5m/15m = entry confirmation",
     }
+
 
 
 
