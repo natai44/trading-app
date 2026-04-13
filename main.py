@@ -1555,6 +1555,7 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
     return img
 
+@app.get("/login", response_class=HTMLResponse)
 def login_page(lang: str = "de", error: str = "", msg: str = ""):
     error_html = f'<div class="banner banner-error">{error}</div>' if error else ""
     msg_html = f'<div class="banner banner-success">{msg}</div>' if msg else ""
