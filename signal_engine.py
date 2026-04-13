@@ -1,103 +1,130 @@
-import time
 import requests
-from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
+import time
 
-# WICHTIG:
-# Alten Telegram Token bei BotFather widerrufen und hier den NEUEN einsetzen.
-TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
-TELEGRAM_CHAT_ID = "1080439188"
+# =========================================
+# PRICE FORMAT
+# =========================================
 
-SCAN_SYMBOLS = [
-    ("crypto", "BTCUSDT"),
-    ("forex", "XAU/USD"),
-]
-
-ALERT_COOLDOWN_SECONDS = 900  # 15 Minuten pro Symbol/Signal
-SCAN_INTERVAL_SECONDS = 90
-
-LAST_ALERTS = {}
+def format_price(price):
+    if price is None:
+        return "-"
+    if abs(price) < 10:
+        return f"{price:.5f}"
+    if abs(price) < 1000:
+        return f"{price:.2f}"
+    return f"{price:,.2f}"
 
 
-def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PUT_YOUR_NEW_TELEGRAM_TOKEN_HERE":
-        print("Telegram token fehlt.")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
-    except Exception as exc:
-        print("Telegram send error:", exc)
+# =========================================
+# DATA FETCH
+# =========================================
+
+def get_crypto_candles(symbol="BTCUSDT", interval="5m", limit=150):
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    r = requests.get(url, params=params, timeout=8)
+    data = r.json()
+
+    candles = []
+    for c in data:
+        candles.append({
+            "open": float(c[1]),
+            "high": float(c[2]),
+            "low": float(c[3]),
+            "close": float(c[4]),
+        })
+    return candles
 
 
-def build_message(market: str, symbol: str, signal: dict) -> str:
-    return (
-        f"{signal['signal_type']}\n"
-        f"Market: {market.upper()} | Symbol: {symbol}\n"
-        f"Preferred: {signal['preferred_side']} | Score: {signal['signal_score']}\n"
-        f"Buy Zone: {format_price(signal['buy_zone_low'])} - {format_price(signal['buy_zone_high'])}\n"
-        f"Sell Zone: {format_price(signal['sell_zone_low'])} - {format_price(signal['sell_zone_high'])}\n"
-        f"Entry: {format_price(signal['entry_price'])}\n"
-        f"SL: {format_price(signal['sl_price'])}\n"
-        f"TP1 / TP2: {format_price(signal['tp1'])} / {format_price(signal['tp2'])}\n"
-        f"TP M / L: {format_price(signal['tp_medium'])} / {format_price(signal['tp_large'])}\n"
-        f"Fib 0.618: {format_price(signal['fib_618'])}\n"
-        f"Session: {signal['session_name']}"
-    )
+def get_gold_forex(symbol="XAU/USD", interval="5min"):
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "apikey": "8f8f55c79aa54b789bd3177ce55e224e"
+    }
+    r = requests.get(url, params=params, timeout=8)
+    data = r.json()
+
+    candles = []
+    for c in reversed(data["values"]):
+        candles.append({
+            "open": float(c["open"]),
+            "high": float(c["high"]),
+            "low": float(c["low"]),
+            "close": float(c["close"]),
+        })
+    return candles
 
 
-def get_alert_type(signal: dict):
-    signal_type = signal.get("signal_type", "")
-    score = float(signal.get("signal_score", 0) or 0)
+# =========================================
+# BASIC ANALYSIS
+# =========================================
 
-    if signal_type == "BUY ENTRY READY" and score >= 55:
-        return "BUY_ENTRY_READY"
-    if signal_type == "SELL ENTRY READY" and score >= 55:
-        return "SELL_ENTRY_READY"
-    if signal_type == "BUY ZONE ACTIVE" and score >= 45:
-        return "BUY_ZONE_ACTIVE"
-    if signal_type == "SELL ZONE ACTIVE" and score >= 45:
-        return "SELL_ZONE_ACTIVE"
-    return None
+def get_multi_timeframe_analysis(market, symbol):
+    if market == "crypto":
+        m5 = get_crypto_candles(symbol, "5m")
+        m15 = get_crypto_candles(symbol, "15m")
+    else:
+        m5 = get_gold_forex(symbol, "5min")
+        m15 = get_gold_forex(symbol, "15min")
 
-
-def maybe_send_alert(market: str, symbol: str, signal: dict):
-    alert_type = get_alert_type(signal)
-    if not alert_type:
-        print(f"No strong alert for {symbol}: {signal.get('signal_type')} score={signal.get('signal_score')}")
-        return
-
-    key = f"{market}:{symbol}:{alert_type}"
-    now = time.time()
-    last_sent = LAST_ALERTS.get(key, 0)
-
-    if now - last_sent < ALERT_COOLDOWN_SECONDS:
-        print(f"Cooldown active for {key}")
-        return
-
-    msg = build_message(market, symbol, signal)
-    send_telegram_message(msg)
-    LAST_ALERTS[key] = now
-    print(f"Alert sent: {key}")
+    return {
+        "M5": m5,
+        "M15": m15
+    }
 
 
-def run_once():
-    for market, symbol in SCAN_SYMBOLS:
-        try:
-            mtf = get_multi_timeframe_analysis(market, symbol)
-            signal = evaluate_signal_engine(mtf)
-            print(f"{symbol} -> {signal['signal_type']} | score={signal['signal_score']} | preferred={signal['preferred_side']}")
-            maybe_send_alert(market, symbol, signal)
-        except Exception as exc:
-            err = f"Worker error on {symbol}: {exc}"
-            print(err)
+# =========================================
+# SIMPLE SIGNAL LOGIC
+# =========================================
 
+def evaluate_signal_engine(mtf):
+    m5 = mtf["M5"]
+    m15 = mtf["M15"]
 
-def main():
-    print("Alert worker started. Symbols: BTCUSDT and XAU/USD")
-    while True:
-        run_once()
-        time.sleep(SCAN_INTERVAL_SECONDS)
+    last = m5[-1]
+    prev = m5[-2]
 
+    price = last["close"]
 
-if __name__ == "__main__":
-    main()
+    # Simple confirmation candle
+    bullish = last["close"] > last["open"] and prev["close"] < prev["open"]
+    bearish = last["close"] < last["open"] and prev["close"] > prev["open"]
+
+    # Local SL (small)
+    sl_buy = min(c["low"] for c in m15[-5:])
+    sl_sell = max(c["high"] for c in m15[-5:])
+
+    risk_buy = price - sl_buy
+    risk_sell = sl_sell - price
+
+    tp_buy = price + risk_buy * 1.5
+    tp_sell = price - risk_sell * 1.5
+
+    if bullish:
+        return {
+            "signal_type": "BUY ENTRY READY",
+            "preferred_side": "BUY",
+            "entry_price": price,
+            "sl_price": sl_buy,
+            "tp1": tp_buy,
+            "tp2": tp_buy,
+            "signal_score": 70
+        }
+
+    if bearish:
+        return {
+            "signal_type": "SELL ENTRY READY",
+            "preferred_side": "SELL",
+            "entry_price": price,
+            "sl_price": sl_sell,
+            "tp1": tp_sell,
+            "tp2": tp_sell,
+            "signal_score": 70
+        }
+
+    return {
+        "signal_type": "NO SIGNAL",
+        "signal_score": 0
+    }
