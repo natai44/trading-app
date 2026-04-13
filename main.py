@@ -396,7 +396,7 @@ def init_db():
             now_iso()
         ))
 
-    cur.execute("DELETE FROM users WHERE username = ? AND role = 'user'", (DEFAULT_USER_USERNAME,))
+    cur.execute("DELETE FROM users WHERE username = ? AND role = 'user'", ("user",))
 
     conn.commit()
     conn.close()
