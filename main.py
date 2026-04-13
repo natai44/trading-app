@@ -19,10 +19,6 @@ DEFAULT_ADMIN_USERNAME = "abdinata"
 DEFAULT_ADMIN_PASSWORD = "Nhatty1996#"
 DEFAULT_ADMIN_EMAIL = "abdisanatai@gmail.com"
 
-DEFAULT_USER_USERNAME = "user"
-DEFAULT_USER_PASSWORD = "user123"
-DEFAULT_USER_EMAIL = "user@example.com"
-
 
 def tr(lang: str, de_text: str, en_text: str) -> str:
     return en_text if lang == "en" else de_text
@@ -1000,6 +996,86 @@ def candle_confirmation(candles, side: str):
     return bearish_close and (stronger_close or reject_high)
 
 
+
+def zone_position(current_price, low_price, high_price):
+    rng = max(high_price - low_price, 1e-9)
+    return (current_price - low_price) / rng
+
+
+def context_reaction_bias(d1, h1, current_price, daily_info):
+    last_day_high = daily_info["last_day_high"]
+    last_day_low = daily_info["last_day_low"]
+    pos = zone_position(current_price, last_day_low, last_day_high)
+
+    if pos >= 0.72:
+        return "SELL_REACTION", "Preis liegt oben im Daily Range / Premium."
+    if pos <= 0.28:
+        return "BUY_REACTION", "Preis liegt unten im Daily Range / Discount."
+
+    if d1["trend"] == "BULLISH" and h1["trend"] == "BULLISH":
+        return "BUY_CONTINUATION", "D1 + H1 bullish continuation."
+    if d1["trend"] == "BEARISH" and h1["trend"] == "BEARISH":
+        return "SELL_CONTINUATION", "D1 + H1 bearish continuation."
+
+    if d1["trend"] == "BULLISH":
+        return "BUY_CONTINUATION", "D1 bullish bias."
+    if d1["trend"] == "BEARISH":
+        return "SELL_CONTINUATION", "D1 bearish bias."
+
+    return "WAIT", "Kein klarer Context Bias."
+
+
+def reaction_trigger_score(side: str, m5, m15, fib, magnet, current_price, buy_zone_low, buy_zone_high, sell_zone_low, sell_zone_high):
+    score = 0
+    reasons = []
+
+    if side == "BUY":
+        if current_price <= buy_zone_high:
+            score += 1
+            reasons.append("buy zone")
+        if m5["lower_sweep"] or m15["lower_sweep"]:
+            score += 2
+            reasons.append("liquidity sweep")
+        if m5["bullish_fvg"] or m15["bullish_fvg"]:
+            score += 1
+            reasons.append("fvg")
+        if m5["bullish_ob"] or m15["bullish_ob"]:
+            score += 1
+            reasons.append("order block")
+        if magnet["stronger_magnet"] == "UP":
+            score += 1
+            reasons.append("magnet")
+        if buy_zone_low <= fib["fib_618"] <= buy_zone_high or buy_zone_low <= fib["fib_786"] <= buy_zone_high:
+            score += 1
+            reasons.append("fibonacci")
+        if m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH" or m15["bos"] == "BULLISH BOS" or m15["choch"] == "BULLISH CHOCH":
+            score += 1
+            reasons.append("bos/choch")
+    else:
+        if current_price >= sell_zone_low:
+            score += 1
+            reasons.append("sell zone")
+        if m5["upper_sweep"] or m15["upper_sweep"]:
+            score += 2
+            reasons.append("liquidity sweep")
+        if m5["bearish_fvg"] or m15["bearish_fvg"]:
+            score += 1
+            reasons.append("fvg")
+        if m5["bearish_ob"] or m15["bearish_ob"]:
+            score += 1
+            reasons.append("order block")
+        if magnet["stronger_magnet"] == "DOWN":
+            score += 1
+            reasons.append("magnet")
+        if sell_zone_low <= fib["fib_50"] <= sell_zone_high or sell_zone_low <= fib["fib_618"] <= sell_zone_high:
+            score += 1
+            reasons.append("fibonacci")
+        if m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH" or m15["bos"] == "BEARISH BOS" or m15["choch"] == "BEARISH CHOCH":
+            score += 1
+            reasons.append("bos/choch")
+
+    return score, reasons
+
 def evaluate_signal_engine(mtf):
     m5 = mtf["M5"]["analysis"]
     m15 = mtf["M15"]["analysis"]
@@ -1014,188 +1090,64 @@ def evaluate_signal_engine(mtf):
     current_price = m5["current_price"]
     last_day_high = daily_info["last_day_high"]
     last_day_low = daily_info["last_day_low"]
-    today_open = daily_info["today_open"]
-
     last_h1_high = h1["recent_high"]
     last_h1_low = h1["recent_low"]
 
     fib = calculate_fibonacci(last_h1_high, last_h1_low)
     magnet = detect_magnet_zones(current_price, d1, h1, m15, m5, daily_info)
-
-    reasons = []
+    context_bias, context_reason = context_reaction_bias(d1, h1, current_price, daily_info)
 
     raw_day_range = max(last_day_high - last_day_low, 1e-9)
     current_abs = max(abs(current_price), 1e-9)
     low_vol_market = (h1["atr"] / current_abs) < 0.0012
 
     if low_vol_market:
-        day_range = max(raw_day_range, h1["atr"] * 6, m15["atr"] * 12, m5["atr"] * 20)
-        zone_half = max(h1["atr"] * 1.1, m15["atr"] * 2.0, m5["atr"] * 3.0)
+        zone_half = max(h1["atr"] * 1.0, m15["atr"] * 1.8, m5["atr"] * 2.5)
     else:
-        day_range = max(raw_day_range, h1["atr"] * 3, m15["atr"] * 6)
-        zone_half = max(h1["atr"] * 0.7, m15["atr"] * 1.3, m5["atr"] * 1.8)
+        zone_half = max(h1["atr"] * 0.6, m15["atr"] * 1.0, m5["atr"] * 1.4)
 
-    # Zones always visible
-    buy_zone_center = min(last_day_low + day_range * 0.18, h1["support"])
-    sell_zone_center = max(last_day_high - day_range * 0.18, h1["resistance"])
+    buy_zone_center = min(last_day_low + raw_day_range * 0.15, h1["support"])
+    sell_zone_center = max(last_day_high - raw_day_range * 0.15, h1["resistance"])
 
     buy_zone_low = buy_zone_center - zone_half
     buy_zone_high = buy_zone_center + zone_half
     sell_zone_low = sell_zone_center - zone_half
     sell_zone_high = sell_zone_center + zone_half
 
-    # Current price always visible / entry adapts to current confirmed price
-    buy_entry_prep = current_price
-    sell_entry_prep = current_price
+    buy_entry = current_price
+    sell_entry = current_price
 
-    # Find nearest invalidation / liquidity behind entry
-    buy_liquidity_stop = min(last_h1_low, m15["last_swing_low"], m5["last_swing_low"], m5["sell_side_liquidity"])
-    sell_liquidity_stop = max(last_h1_high, m15["last_swing_high"], m5["last_swing_high"], m5["buy_side_liquidity"])
+    buy_sl = min(m5["last_swing_low"], m15["last_swing_low"], m5["sell_side_liquidity"], m15["sell_side_liquidity"])
+    sell_sl = max(m5["last_swing_high"], m15["last_swing_high"], m5["buy_side_liquidity"], m15["buy_side_liquidity"])
 
-    buy_sl = buy_liquidity_stop
-    sell_sl = sell_liquidity_stop
+    buy_risk = max(buy_entry - buy_sl, m15["atr"] * 1.2, m5["atr"] * 1.8, 1e-9)
+    sell_risk = max(sell_sl - sell_entry, m15["atr"] * 1.2, m5["atr"] * 1.8, 1e-9)
 
-    # Main targets stay based on your strategy
+    buy_tp1 = buy_entry + buy_risk * 1.0
+    buy_tp2 = buy_entry + buy_risk * 1.5
+    sell_tp1 = sell_entry - sell_risk * 1.0
+    sell_tp2 = sell_entry - sell_risk * 1.5
+
     buy_tp_medium = last_h1_high
     buy_tp_large = last_day_high
     sell_tp_medium = last_h1_low
     sell_tp_large = last_day_low
 
-    # Flexible confluences (not all together)
-    buy_confluences = []
-    sell_confluences = []
+    buy_confirm = candle_confirmation(m5_candles, "BUY") or candle_confirmation(m15_candles, "BUY")
+    sell_confirm = candle_confirmation(m5_candles, "SELL") or candle_confirmation(m15_candles, "SELL")
 
-    if buy_zone_low <= current_price <= buy_zone_high or current_price <= buy_zone_high:
-        buy_confluences.append("zone")
-    if sell_zone_low <= current_price <= sell_zone_high or current_price >= sell_zone_low:
-        sell_confluences.append("zone")
+    buy_trigger_score, buy_triggers = reaction_trigger_score("BUY", m5, m15, fib, magnet, current_price, buy_zone_low, buy_zone_high, sell_zone_low, sell_zone_high)
+    sell_trigger_score, sell_triggers = reaction_trigger_score("SELL", m5, m15, fib, magnet, current_price, buy_zone_low, buy_zone_high, sell_zone_low, sell_zone_high)
 
-    if m5["lower_sweep"] or m15["lower_sweep"] or h1["lower_sweep"]:
-        buy_confluences.append("liquidity")
-    if m5["upper_sweep"] or m15["upper_sweep"] or h1["upper_sweep"]:
-        sell_confluences.append("liquidity")
+    reasons = [context_reason]
+    reasons.append(f"BUY triggers: {', '.join(buy_triggers) if buy_triggers else 'none'}")
+    reasons.append(f"SELL triggers: {', '.join(sell_triggers) if sell_triggers else 'none'}")
 
-    if m5["bullish_fvg"] or m15["bullish_fvg"] or h1["bullish_fvg"]:
-        buy_confluences.append("fvg")
-    if m5["bearish_fvg"] or m15["bearish_fvg"] or h1["bearish_fvg"]:
-        sell_confluences.append("fvg")
-
-    if m5["bullish_ob"] or m15["bullish_ob"] or h1["bullish_ob"]:
-        buy_confluences.append("ob")
-    if m5["bearish_ob"] or m15["bearish_ob"] or h1["bearish_ob"]:
-        sell_confluences.append("ob")
-
-    if magnet["stronger_magnet"] == "UP":
-        buy_confluences.append("magnet")
-    if magnet["stronger_magnet"] == "DOWN":
-        sell_confluences.append("magnet")
-
-    if buy_zone_low <= fib["fib_618"] <= buy_zone_high or buy_zone_low <= fib["fib_786"] <= buy_zone_high:
-        buy_confluences.append("fib")
-    if sell_zone_low <= fib["fib_50"] <= sell_zone_high or sell_zone_low <= fib["fib_618"] <= sell_zone_high:
-        sell_confluences.append("fib")
-
-    if m5["bos"] == "BULLISH BOS" or m5["choch"] == "BULLISH CHOCH" or m15["bos"] == "BULLISH BOS" or m15["choch"] == "BULLISH CHOCH":
-        buy_confluences.append("breakout")
-    if m5["bos"] == "BEARISH BOS" or m5["choch"] == "BEARISH CHOCH" or m15["bos"] == "BEARISH BOS" or m15["choch"] == "BEARISH CHOCH":
-        sell_confluences.append("breakout")
-
-    buy_candle_confirm = candle_confirmation(m5_candles, "BUY") or candle_confirmation(m15_candles, "BUY")
-    sell_candle_confirm = candle_confirmation(m5_candles, "SELL") or candle_confirmation(m15_candles, "SELL")
-
-    buy_ready = len(set(buy_confluences) - {"zone"}) >= 1 and buy_candle_confirm
-    sell_ready = len(set(sell_confluences) - {"zone"}) >= 1 and sell_candle_confirm
-
-    # 5m / 15m statuses always visible
-    m5_buy_status = "5M BUY WAIT"
-    if buy_candle_confirm:
-        m5_buy_status = "5M BUY CANDLE CONFIRM"
-    if buy_ready:
-        m5_buy_status = "5M BUY ENTRY READY"
-
-    m5_sell_status = "5M SELL WAIT"
-    if sell_candle_confirm:
-        m5_sell_status = "5M SELL CANDLE CONFIRM"
-    if sell_ready:
-        m5_sell_status = "5M SELL ENTRY READY"
-
-    m15_buy_status = "15M BUY PREPARATION" if ("zone" in buy_confluences or len(buy_confluences) > 0) else "15M BUY WAIT"
-    m15_sell_status = "15M SELL PREPARATION" if ("zone" in sell_confluences or len(sell_confluences) > 0) else "15M SELL WAIT"
-
-    # 5m/15m entry always based on current price
-    m5_buy_entry = current_price
-    m5_sell_entry = current_price
-    m15_buy_entry = current_price
-    m15_sell_entry = current_price
-
-    buy_risk = max(m5_buy_entry - buy_sl, h1["atr"] * 0.9, m15["atr"] * 1.4, m5["atr"] * 1.8, 1e-9)
-    sell_risk = max(sell_sl - m5_sell_entry, h1["atr"] * 0.9, m15["atr"] * 1.4, m5["atr"] * 1.8, 1e-9)
-
-    buy_tp1 = m5_buy_entry + buy_risk * 1.0
-    buy_tp2 = m5_buy_entry + buy_risk * 1.5
-    sell_tp1 = m5_sell_entry - sell_risk * 1.0
-    sell_tp2 = m5_sell_entry - sell_risk * 1.5
-
-    m5_buy_sl = buy_sl
-    m5_sell_sl = sell_sl
-    m15_buy_sl = buy_sl
-    m15_sell_sl = sell_sl
-
-    m5_buy_tp1 = buy_tp1
-    m5_buy_tp2 = buy_tp2
-    m5_sell_tp1 = sell_tp1
-    m5_sell_tp2 = sell_tp2
-    m15_buy_tp1 = buy_tp1
-    m15_buy_tp2 = buy_tp2
-    m15_sell_tp1 = sell_tp1
-    m15_sell_tp2 = sell_tp2
-
-    # Score with hysteresis so direction doesn't flip too easily
-    buy_score = 0
-    sell_score = 0
-
-    if d1["trend"] == "BULLISH":
-        buy_score += 20
-    elif d1["trend"] == "BEARISH":
-        sell_score += 20
-
-    if h1["trend"] == "BULLISH":
-        buy_score += 20
-    elif h1["trend"] == "BEARISH":
-        sell_score += 20
-
-    if h4["trend"] == "BULLISH":
-        buy_score += 8
-    elif h4["trend"] == "BEARISH":
-        sell_score += 8
-
-    if current_price > today_open:
-        buy_score += 4
-    elif current_price < today_open:
-        sell_score += 4
-
-    buy_score += min(len(set(buy_confluences)) * 6, 30)
-    sell_score += min(len(set(sell_confluences)) * 6, 30)
-
-    if buy_candle_confirm:
-        buy_score += 8
-    if sell_candle_confirm:
-        sell_score += 8
-
-    buy_score += max(0, magnet["magnet_up_score"] // 4)
-    sell_score += max(0, magnet["magnet_down_score"] // 4)
-
-    # keep stable unless side clearly stronger
-    if buy_score >= sell_score + 12:
-        preferred_side = "BUY"
-    elif sell_score >= buy_score + 12:
-        preferred_side = "SELL"
-    else:
-        preferred_side = "RANGE / WAIT"
-
-    signal_type = "BOTH ZONES VISIBLE"
-    signal_status = "WAIT FOR CONFIRM CANDLE"
-    entry_price = current_price
+    preferred_side = "WAIT"
+    signal_type = "NO SIGNAL"
+    signal_status = "WAIT CONFIRMATION"
+    signal_score = 0
+    entry_price = None
     sl_price = None
     tp1 = None
     tp2 = None
@@ -1204,53 +1156,52 @@ def evaluate_signal_engine(mtf):
     zone_low = None
     zone_high = None
 
-    if preferred_side == "BUY":
+    if context_bias in ["BUY_REACTION", "BUY_CONTINUATION"]:
+        preferred_side = "BUY"
+        signal_score = buy_trigger_score * 10 + (10 if buy_confirm else 0)
         zone_low = buy_zone_low
         zone_high = buy_zone_high
-        sl_price = buy_sl
-        tp1 = buy_tp1
-        tp2 = buy_tp2
-        tp_medium = buy_tp_medium
-        tp_large = buy_tp_large
-        signal_type = "BUY SIDE PREPARATION"
-        signal_status = "WATCH BUY CONFIRMATION"
-        if buy_ready:
+        if buy_confirm and buy_trigger_score >= 2:
             signal_type = "BUY ENTRY READY"
-            signal_status = "CONFIRM CANDLE + CONFLUENCE"
-        elif "zone" in buy_confluences:
-            signal_type = "BUY ZONE ACTIVE"
-            signal_status = "WAIT FOR CONFIRM CANDLE"
+            signal_status = "CONFIRMED BUY"
+            entry_price = buy_entry
+            sl_price = buy_sl
+            tp1 = buy_tp1
+            tp2 = buy_tp2
+            tp_medium = buy_tp_medium
+            tp_large = buy_tp_large
+        elif buy_trigger_score >= 1:
+            signal_type = "BUY CONTEXT READY"
+            signal_status = "WAIT BUY CONFIRM CANDLE"
 
-    elif preferred_side == "SELL":
+    elif context_bias in ["SELL_REACTION", "SELL_CONTINUATION"]:
+        preferred_side = "SELL"
+        signal_score = sell_trigger_score * 10 + (10 if sell_confirm else 0)
         zone_low = sell_zone_low
         zone_high = sell_zone_high
-        sl_price = sell_sl
-        tp1 = sell_tp1
-        tp2 = sell_tp2
-        tp_medium = sell_tp_medium
-        tp_large = sell_tp_large
-        signal_type = "SELL SIDE PREPARATION"
-        signal_status = "WATCH SELL CONFIRMATION"
-        if sell_ready:
+        if sell_confirm and sell_trigger_score >= 2:
             signal_type = "SELL ENTRY READY"
-            signal_status = "CONFIRM CANDLE + CONFLUENCE"
-        elif "zone" in sell_confluences:
-            signal_type = "SELL ZONE ACTIVE"
-            signal_status = "WAIT FOR CONFIRM CANDLE"
-
-    reasons.extend([f"BUY: {', '.join(sorted(set(buy_confluences)))}" if buy_confluences else "BUY: no trigger"])
-    reasons.extend([f"SELL: {', '.join(sorted(set(sell_confluences)))}" if sell_confluences else "SELL: no trigger"])
+            signal_status = "CONFIRMED SELL"
+            entry_price = sell_entry
+            sl_price = sell_sl
+            tp1 = sell_tp1
+            tp2 = sell_tp2
+            tp_medium = sell_tp_medium
+            tp_large = sell_tp_large
+        elif sell_trigger_score >= 1:
+            signal_type = "SELL CONTEXT READY"
+            signal_status = "WAIT SELL CONFIRM CANDLE"
 
     explanation = " | ".join(reasons)
 
     return {
         "signal_type": signal_type,
         "signal_status": signal_status,
-        "signal_score": max(buy_score, sell_score),
+        "signal_score": signal_score,
         "preferred_side": preferred_side,
         "prep_price": current_price,
         "trigger_price": current_price,
-        "entry_price": current_price,
+        "entry_price": entry_price,
         "sl_price": sl_price,
         "tp1": tp1,
         "tp2": tp2,
@@ -1262,19 +1213,19 @@ def evaluate_signal_engine(mtf):
         "last_day_low": last_day_low,
         "last_h1_high": last_h1_high,
         "last_h1_low": last_h1_low,
-        "buy_score": buy_score,
+        "buy_score": buy_trigger_score,
         "buy_zone_low": buy_zone_low,
         "buy_zone_high": buy_zone_high,
-        "buy_entry": buy_entry_prep,
+        "buy_entry": buy_entry,
         "buy_sl": buy_sl,
         "buy_tp1": buy_tp1,
         "buy_tp2": buy_tp2,
         "buy_tp_medium": buy_tp_medium,
         "buy_tp_large": buy_tp_large,
-        "sell_score": sell_score,
+        "sell_score": sell_trigger_score,
         "sell_zone_low": sell_zone_low,
         "sell_zone_high": sell_zone_high,
-        "sell_entry": sell_entry_prep,
+        "sell_entry": sell_entry,
         "sell_sl": sell_sl,
         "sell_tp1": sell_tp1,
         "sell_tp2": sell_tp2,
@@ -1283,32 +1234,32 @@ def evaluate_signal_engine(mtf):
         "fib_50": fib["fib_50"],
         "fib_618": fib["fib_618"],
         "fib_786": fib["fib_786"],
-        "buy_fvg": "YES" if (m5["bullish_fvg"] or m15["bullish_fvg"] or h1["bullish_fvg"]) else "NO",
-        "sell_fvg": "YES" if (m5["bearish_fvg"] or m15["bearish_fvg"] or h1["bearish_fvg"]) else "NO",
-        "buy_ob": "YES" if (m5["bullish_ob"] or m15["bullish_ob"] or h1["bullish_ob"]) else "NO",
-        "sell_ob": "YES" if (m5["bearish_ob"] or m15["bearish_ob"] or h1["bearish_ob"]) else "NO",
-        "buy_sweep": "YES" if (m5["lower_sweep"] or m15["lower_sweep"] or h1["lower_sweep"]) else "NO",
-        "sell_sweep": "YES" if (m5["upper_sweep"] or m15["upper_sweep"] or h1["upper_sweep"]) else "NO",
-        "m5_buy_status": m5_buy_status,
-        "m5_buy_entry": m5_buy_entry,
-        "m5_buy_sl": m5_buy_sl,
-        "m5_buy_tp1": m5_buy_tp1,
-        "m5_buy_tp2": m5_buy_tp2,
-        "m5_sell_status": m5_sell_status,
-        "m5_sell_entry": m5_sell_entry,
-        "m5_sell_sl": m5_sell_sl,
-        "m5_sell_tp1": m5_sell_tp1,
-        "m5_sell_tp2": m5_sell_tp2,
-        "m15_buy_status": m15_buy_status,
-        "m15_buy_entry": m15_buy_entry,
-        "m15_buy_sl": m15_buy_sl,
-        "m15_buy_tp1": m15_buy_tp1,
-        "m15_buy_tp2": m15_buy_tp2,
-        "m15_sell_status": m15_sell_status,
-        "m15_sell_entry": m15_sell_entry,
-        "m15_sell_sl": m15_sell_sl,
-        "m15_sell_tp1": m15_sell_tp1,
-        "m15_sell_tp2": m15_sell_tp2,
+        "buy_fvg": "YES" if (m5["bullish_fvg"] or m15["bullish_fvg"]) else "NO",
+        "sell_fvg": "YES" if (m5["bearish_fvg"] or m15["bearish_fvg"]) else "NO",
+        "buy_ob": "YES" if (m5["bullish_ob"] or m15["bullish_ob"]) else "NO",
+        "sell_ob": "YES" if (m5["bearish_ob"] or m15["bearish_ob"]) else "NO",
+        "buy_sweep": "YES" if (m5["lower_sweep"] or m15["lower_sweep"]) else "NO",
+        "sell_sweep": "YES" if (m5["upper_sweep"] or m15["upper_sweep"]) else "NO",
+        "m5_buy_status": "LOOK FOR BUY" if preferred_side == "BUY" else "NO BUY SIGNAL",
+        "m5_buy_entry": buy_entry,
+        "m5_buy_sl": buy_sl,
+        "m5_buy_tp1": buy_tp1,
+        "m5_buy_tp2": buy_tp2,
+        "m5_sell_status": "LOOK FOR SELL" if preferred_side == "SELL" else "NO SELL SIGNAL",
+        "m5_sell_entry": sell_entry,
+        "m5_sell_sl": sell_sl,
+        "m5_sell_tp1": sell_tp1,
+        "m5_sell_tp2": sell_tp2,
+        "m15_buy_status": "BUY CONTEXT" if preferred_side == "BUY" else "WAIT",
+        "m15_buy_entry": buy_entry,
+        "m15_buy_sl": buy_sl,
+        "m15_buy_tp1": buy_tp1,
+        "m15_buy_tp2": buy_tp2,
+        "m15_sell_status": "SELL CONTEXT" if preferred_side == "SELL" else "WAIT",
+        "m15_sell_entry": sell_entry,
+        "m15_sell_sl": sell_sl,
+        "m15_sell_tp1": sell_tp1,
+        "m15_sell_tp2": sell_tp2,
         "magnet_up_score": magnet["magnet_up_score"],
         "magnet_down_score": magnet["magnet_down_score"],
         "stronger_magnet": magnet["stronger_magnet"],
@@ -1319,8 +1270,9 @@ def evaluate_signal_engine(mtf):
         "session_name": get_session_context(),
         "news_filter": "Manual check recommended before high-impact news",
         "explanation": explanation,
-        "timeframe_note": "Zones always visible | Entry needs candle confirmation + at least one valid trigger",
+        "timeframe_note": "D1/H1 = context + zone + TP | 5m/15m = entry confirmation only",
     }
+
 
 
 def get_latest_signal(market: str, symbol: str):
@@ -1416,28 +1368,20 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
     img = np.zeros((height, width, 3), dtype=np.uint8)
     img[:] = (11, 14, 20)
 
-    # Analysis still uses full history; chart shows a readable zoom.
     if market == "forex":
-        view_candles = candles[-36:] if len(candles) > 36 else candles
+        view_candles = candles[-48:] if len(candles) > 48 else candles
     else:
-        view_candles = candles[-80:] if len(candles) > 80 else candles
+        view_candles = candles[-72:] if len(candles) > 72 else candles
 
     highs = [c["high"] for c in view_candles]
     lows = [c["low"] for c in view_candles]
 
-    # Scale only around the visible candles + a few critical levels.
     scale_prices = list(highs + lows)
     for p in [
-        signal.get("last_h1_high"),
-        signal.get("last_h1_low"),
-        signal.get("entry_price"),
-        signal.get("sl_price"),
-        signal.get("tp1"),
-        signal.get("fib_618"),
-        signal.get("buy_zone_low"),
-        signal.get("buy_zone_high"),
-        signal.get("sell_zone_low"),
-        signal.get("sell_zone_high"),
+        signal.get("zone_low"), signal.get("zone_high"),
+        signal.get("entry_price"), signal.get("sl_price"),
+        signal.get("tp1"), signal.get("last_h1_high"),
+        signal.get("last_h1_low"), signal.get("fib_618"),
     ]:
         if p is not None:
             scale_prices.append(float(p))
@@ -1445,8 +1389,7 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
     max_price = max(scale_prices)
     min_price = min(scale_prices)
     price_range = max(max_price - min_price, 1e-9)
-
-    pad = price_range * (0.42 if market == "forex" else 0.25)
+    pad = price_range * (0.28 if market == "forex" else 0.22)
     max_price += pad
     min_price -= pad
     price_range = max(max_price - min_price, 1e-9)
@@ -1457,87 +1400,84 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
 
     n = len(view_candles)
     usable_w = width - left_pad - right_pad
-    candle_step = max(usable_w // max(n, 1), 18 if market == "forex" else 12)
-    candle_w = max(10 if market == "forex" else 6, min(20, candle_step - 4))
+    candle_step = max(usable_w // max(n, 1), 11)
+    candle_w = max(5, min(10, candle_step - 3))
 
     overlay = img.copy()
-
     if signal.get("buy_zone_low") is not None and signal.get("buy_zone_high") is not None:
         zy_top = price_to_y(signal["buy_zone_high"])
         zy_bottom = price_to_y(signal["buy_zone_low"])
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (0, 80, 0), -1)
-
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (0, 70, 0), -1)
     if signal.get("sell_zone_low") is not None and signal.get("sell_zone_high") is not None:
         zy_top = price_to_y(signal["sell_zone_high"])
         zy_bottom = price_to_y(signal["sell_zone_low"])
-        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (80, 0, 0), -1)
-
+        cv2.rectangle(overlay, (left_pad, zy_top), (width - right_pad, zy_bottom), (70, 0, 0), -1)
     cv2.addWeighted(overlay, 0.10, img, 0.90, 0, img)
 
     for i in range(7):
         y = chart_top + int((chart_bottom - chart_top) * i / 6)
         cv2.line(img, (left_pad, y), (width - right_pad, y), (45, 50, 60), 1)
 
-    # Real, thicker candles, especially for Forex/Gold
     for i, c in enumerate(view_candles):
         x = left_pad + i * candle_step + candle_step // 2
         y_open = price_to_y(c["open"])
         y_close = price_to_y(c["close"])
         y_high = price_to_y(c["high"])
         y_low = price_to_y(c["low"])
-
         bullish = c["close"] >= c["open"]
         color = (0, 200, 120) if bullish else (0, 70, 255)
 
-        cv2.line(img, (x, y_high), (x, y_low), color, 2)
+        cv2.line(img, (x, y_high), (x, y_low), color, 1)
         top = min(y_open, y_close)
         bottom = max(y_open, y_close)
-
-        min_body = 10 if market == "forex" else 5
+        min_body = 5 if market == "forex" else 4
         if bottom - top < min_body:
             bottom = top + min_body
-
         cv2.rectangle(img, (x - candle_w // 2, top), (x + candle_w // 2, bottom), color, -1)
 
-    # Keep only important levels on chart so candles stay visible
     levels = [
         ("LAST H1 HIGH", signal.get("last_h1_high"), (255, 170, 170)),
         ("LAST H1 LOW", signal.get("last_h1_low"), (170, 220, 255)),
         ("FIB 0.618", signal.get("fib_618"), (255, 200, 80)),
-        ("ENTRY", signal.get("entry_price"), (0, 255, 0)),
-        ("SL", signal.get("sl_price"), (0, 0, 255)),
-        ("TP1", signal.get("tp1"), (0, 255, 255)),
     ]
+    if signal.get("entry_price") is not None:
+        levels.extend([
+            ("ENTRY", signal.get("entry_price"), (0, 255, 0)),
+            ("SL", signal.get("sl_price"), (0, 0, 255)),
+            ("TP1", signal.get("tp1"), (0, 255, 255)),
+        ])
 
     for label, price, color in levels:
         if price is None:
             continue
         y = price_to_y(price)
         cv2.line(img, (left_pad, y), (width - right_pad, y), color, 1)
-        cv2.putText(img, f"{label}: {format_price(price)}", (left_pad + 10, y - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(img, f"{label}: {format_price(price)}", (left_pad + 10, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 
-    cv2.putText(img, f"{market.upper()} | {symbol.upper()} | Signal: {signal.get('signal_type', '')}",
-                (25, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2)
+    cv2.putText(
+        img,
+        f"{market.upper()} | {symbol.upper()} | Signal: {signal.get('signal_type', '')} | Preferred: {signal.get('preferred_side', '')}",
+        (25, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 255, 255),
+        2,
+    )
 
     cv2.rectangle(img, (0, 540), (width, height), (20, 24, 30), -1)
     cv2.line(img, (0, 540), (width, 540), (0, 255, 120), 2)
 
     info_lines = [
+        f"Current Price: {format_price(signal.get('trigger_price'))}",
         f"Signal: {signal.get('signal_type', '-')} | Status: {signal.get('signal_status', '-')}",
-        f"Volatility Mode: {signal.get('market_volatility_mode', '-')}",
+        f"Preferred Side: {signal.get('preferred_side', '-')}",
         f"Buy Zone: {format_price(signal.get('buy_zone_low'))} - {format_price(signal.get('buy_zone_high'))}",
         f"Sell Zone: {format_price(signal.get('sell_zone_low'))} - {format_price(signal.get('sell_zone_high'))}",
         f"Entry: {format_price(signal.get('entry_price'))} | SL: {format_price(signal.get('sl_price'))}",
-        f"TP1: {format_price(signal.get('tp1'))} | TP2: {format_price(signal.get('tp2'))}",
-        f"TP Medium: {format_price(signal.get('tp_medium'))} | TP Large: {format_price(signal.get('tp_large'))}",
+        f"TP1 / TP2: {format_price(signal.get('tp1'))} / {format_price(signal.get('tp2'))}",
         f"Fib 0.5 / 0.618 / 0.786: {format_price(signal.get('fib_50'))} / {format_price(signal.get('fib_618'))} / {format_price(signal.get('fib_786'))}",
-        f"Last D High/Low: {format_price(signal.get('last_day_high'))} / {format_price(signal.get('last_day_low'))}",
-        f"Last H1 High/Low: {format_price(signal.get('last_h1_high'))} / {format_price(signal.get('last_h1_low'))}",
-        f"Trend: {analysis.get('trend')} | BOS: {analysis.get('bos')} | CHOCH: {analysis.get('choch')}",
-        f"Liquidity: {format_price(analysis.get('buy_side_liquidity'))} / {format_price(analysis.get('sell_side_liquidity'))}",
-        f"Support / Resistance: {format_price(analysis.get('support'))} / {format_price(analysis.get('resistance'))}",
-        f"FVG: {analysis.get('fvg_text', '-')}",
+        f"Magnet: {signal.get('stronger_magnet')} | Session: {signal.get('session_name')}",
+        f"5m/15m confirmation only after context bias",
     ]
 
     y = 575
@@ -1546,6 +1486,7 @@ def draw_chart(candles, analysis, signal, symbol: str, market: str):
         y += 24
 
     return img
+
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(lang: str = "de", error: str = "", msg: str = ""):
