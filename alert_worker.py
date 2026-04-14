@@ -11,9 +11,7 @@ from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, 
 TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
 TELEGRAM_CHAT_ID = "1080439188"
 
-SCAN_SYMBOLS = [
-    ("crypto", "BTCUSDT"),
-    ("forex", "XAU/USD"),
+SCAN_SYMBOLS = [("forex", "XAU/USD"),
 ]
 
 SCAN_INTERVAL_SECONDS = 90
