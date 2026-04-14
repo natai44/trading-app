@@ -131,8 +131,6 @@ def strong_bearish_candle(candle):
     body = abs(candle["close"] - candle["open"])
     close_near_low = (candle["close"] - candle["low"]) <= total * 0.20
     return candle["close"] < candle["open"] and body >= total * 0.50 and close_near_low
-
-
 def bullish_candle_pattern(candles):
     if len(candles) < 2:
         return False
@@ -140,9 +138,16 @@ def bullish_candle_pattern(candles):
     prev = candles[-2]
     last = candles[-1]
 
-    engulf = last["close"] > prev["high"]
-    reclaim = last["close"] > prev["close"]
-    return strong_bullish_candle(last) and (engulf or reclaim)
+    total = max(last["high"] - last["low"], 1e-9)
+    body = abs(last["close"] - last["open"])
+
+    strong_green = last["close"] > last["open"]
+    strong_body = body >= total * 0.60
+    close_near_high = (last["high"] - last["close"]) <= total * 0.15
+    breaks_prev_high = last["close"] > prev["high"]
+    no_big_upper_wick = (last["high"] - last["close"]) <= body * 0.35
+
+    return strong_green and strong_body and close_near_high and breaks_prev_high and no_big_upper_wick
 
 
 def bearish_candle_pattern(candles):
@@ -152,9 +157,16 @@ def bearish_candle_pattern(candles):
     prev = candles[-2]
     last = candles[-1]
 
-    break_down = last["close"] < prev["low"]
-    press = last["close"] < prev["close"]
-    return strong_bearish_candle(last) and (break_down or press)
+    total = max(last["high"] - last["low"], 1e-9)
+    body = abs(last["close"] - last["open"])
+
+    strong_red = last["close"] < last["open"]
+    strong_body = body >= total * 0.60
+    close_near_low = (last["close"] - last["low"]) <= total * 0.15
+    breaks_prev_low = last["close"] < prev["low"]
+    no_big_lower_wick = (last["close"] - last["low"]) <= body * 0.35
+
+    return strong_red and strong_body and close_near_low and breaks_prev_low and no_big_lower_wick
 
 
 def detect_fvg(candles):
