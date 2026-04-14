@@ -72,18 +72,14 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
         return {
             "m5": get_crypto_candles(symbol, "5m"),
             "m15": get_crypto_candles(symbol, "15m"),
-            "m30": get_crypto_candles(symbol, "30m"),
             "h1": get_crypto_candles(symbol, "1h"),
-            "d1": get_crypto_candles(symbol, "1d"),
         }
 
     if market == "forex":
         return {
             "m5": get_forex_candles(symbol, "5min"),
             "m15": get_forex_candles(symbol, "15min"),
-            "m30": get_forex_candles(symbol, "30min"),
             "h1": get_forex_candles(symbol, "1h"),
-            "d1": get_forex_candles(symbol, "1day"),
         }
 
     raise ValueError(f"Unsupported market: {market}")
@@ -103,18 +99,18 @@ def recent_low(candles, count: int):
     return min(c["low"] for c in candles[-count:])
 
 
-def get_bias(h1, d1):
+def get_bias(h1, m15):
     h1_closes = [c["close"] for c in h1]
-    d1_closes = [c["close"] for c in d1]
+    m15_closes = [c["close"] for c in m15]
 
     h1_fast = sma(h1_closes, 5)
     h1_slow = sma(h1_closes, 20)
-    d1_fast = sma(d1_closes, 5)
-    d1_slow = sma(d1_closes, 20)
+    m15_fast = sma(m15_closes, 5)
+    m15_slow = sma(m15_closes, 20)
 
-    if h1_fast > h1_slow and d1_fast > d1_slow:
+    if h1_fast > h1_slow and m15_fast > m15_slow:
         return "BULLISH"
-    if h1_fast < h1_slow and d1_fast < d1_slow:
+    if h1_fast < h1_slow and m15_fast < m15_slow:
         return "BEARISH"
     return "NEUTRAL"
 
@@ -122,15 +118,19 @@ def get_bias(h1, d1):
 def strong_bullish_candle(candle):
     total = max(candle["high"] - candle["low"], 1e-9)
     body = abs(candle["close"] - candle["open"])
-    close_near_high = (candle["high"] - candle["close"]) <= total * 0.20
-    return candle["close"] > candle["open"] and body >= total * 0.50 and close_near_high
+    close_near_high = (candle["high"] - candle["close"]) <= total * 0.15
+    no_big_upper_wick = (candle["high"] - candle["close"]) <= body * 0.35
+    return candle["close"] > candle["open"] and body >= total * 0.60 and close_near_high and no_big_upper_wick
 
 
 def strong_bearish_candle(candle):
     total = max(candle["high"] - candle["low"], 1e-9)
     body = abs(candle["close"] - candle["open"])
-    close_near_low = (candle["close"] - candle["low"]) <= total * 0.20
-    return candle["close"] < candle["open"] and body >= total * 0.50 and close_near_low
+    close_near_low = (candle["close"] - candle["low"]) <= total * 0.15
+    no_big_lower_wick = (candle["close"] - candle["low"]) <= body * 0.35
+    return candle["close"] < candle["open"] and body >= total * 0.60 and close_near_low and no_big_lower_wick
+
+
 def bullish_candle_pattern(candles):
     if len(candles) < 2:
         return False
@@ -138,16 +138,7 @@ def bullish_candle_pattern(candles):
     prev = candles[-2]
     last = candles[-1]
 
-    total = max(last["high"] - last["low"], 1e-9)
-    body = abs(last["close"] - last["open"])
-
-    strong_green = last["close"] > last["open"]
-    strong_body = body >= total * 0.60
-    close_near_high = (last["high"] - last["close"]) <= total * 0.15
-    breaks_prev_high = last["close"] > prev["high"]
-    no_big_upper_wick = (last["high"] - last["close"]) <= body * 0.35
-
-    return strong_green and strong_body and close_near_high and breaks_prev_high and no_big_upper_wick
+    return strong_bullish_candle(last) and last["close"] > prev["high"]
 
 
 def bearish_candle_pattern(candles):
@@ -157,16 +148,7 @@ def bearish_candle_pattern(candles):
     prev = candles[-2]
     last = candles[-1]
 
-    total = max(last["high"] - last["low"], 1e-9)
-    body = abs(last["close"] - last["open"])
-
-    strong_red = last["close"] < last["open"]
-    strong_body = body >= total * 0.60
-    close_near_low = (last["close"] - last["low"]) <= total * 0.15
-    breaks_prev_low = last["close"] < prev["low"]
-    no_big_lower_wick = (last["close"] - last["low"]) <= body * 0.35
-
-    return strong_red and strong_body and close_near_low and breaks_prev_low and no_big_lower_wick
+    return strong_bearish_candle(last) and last["close"] < prev["low"]
 
 
 def detect_fvg(candles):
@@ -238,19 +220,19 @@ def detect_magnet(m15):
     return hi, lo
 
 
-def local_buy_sl(m15, m30, entry):
+def local_buy_sl(m15, entry):
     candidates = [
         recent_low(m15, min(5, len(m15))),
-        recent_low(m30, min(5, len(m30))),
+        recent_low(m15, min(8, len(m15))),
     ]
     below = [x for x in candidates if x < entry]
     return max(below) if below else min(candidates)
 
 
-def local_sell_sl(m15, m30, entry):
+def local_sell_sl(m15, entry):
     candidates = [
         recent_high(m15, min(5, len(m15))),
-        recent_high(m30, min(5, len(m30))),
+        recent_high(m15, min(8, len(m15))),
     ]
     above = [x for x in candidates if x > entry]
     return min(above) if above else max(candidates)
@@ -259,11 +241,9 @@ def local_sell_sl(m15, m30, entry):
 def evaluate_signal_engine(mtf):
     m5 = mtf["m5"]
     m15 = mtf["m15"]
-    m30 = mtf["m30"]
     h1 = mtf["h1"]
-    d1 = mtf["d1"]
 
-    bias = get_bias(h1, d1)
+    bias = get_bias(h1, m15)
     price = m5[-1]["close"]
 
     fvg = detect_fvg(m5)
@@ -332,7 +312,7 @@ def evaluate_signal_engine(mtf):
         signal_type = "BUY ENTRY READY"
         signal_status = "CONFIRMED BUY"
         entry_price = price
-        sl_price = local_buy_sl(m15, m30, entry_price)
+        sl_price = local_buy_sl(m15, entry_price)
         risk = max(entry_price - sl_price, 1e-9)
 
         tp1 = entry_price + risk * 1.2
@@ -351,7 +331,7 @@ def evaluate_signal_engine(mtf):
         signal_type = "SELL ENTRY READY"
         signal_status = "CONFIRMED SELL"
         entry_price = price
-        sl_price = local_sell_sl(m15, m30, entry_price)
+        sl_price = local_sell_sl(m15, entry_price)
         risk = max(sl_price - entry_price, 1e-9)
 
         tp1 = entry_price - risk * 1.2
