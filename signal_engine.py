@@ -172,10 +172,20 @@ def detect_sweep(candles):
     prev = candles[-2]
     last = candles[-1]
 
+    # BUY Sweep + Rejection
     if last["low"] < prev["low"] and last["close"] > prev["low"]:
-        return "BUY"
+        wick = prev["low"] - last["low"]
+        body = abs(last["close"] - last["open"])
+        if wick > body:  # echte Rejection
+            return "BUY"
+
+    # SELL Sweep + Rejection
     if last["high"] > prev["high"] and last["close"] < prev["high"]:
-        return "SELL"
+        wick = last["high"] - prev["high"]
+        body = abs(last["close"] - last["open"])
+        if wick > body:
+            return "SELL"
+
     return None
 
 
@@ -197,14 +207,24 @@ def detect_bos(candles):
     if len(candles) < 6:
         return None
 
-    last_close = candles[-1]["close"]
+    last = candles[-1]
     highs = [c["high"] for c in candles[-6:-1]]
     lows = [c["low"] for c in candles[-6:-1]]
 
-    if last_close > max(highs):
-        return "BUY"
-    if last_close < min(lows):
-        return "SELL"
+    # BUY BOS + Momentum
+    if last["close"] > max(highs):
+        body = abs(last["close"] - last["open"])
+        total = last["high"] - last["low"]
+        if body > total * 0.5:
+            return "BUY"
+
+    # SELL BOS + Momentum
+    if last["close"] < min(lows):
+        body = abs(last["close"] - last["open"])
+        total = last["high"] - last["low"]
+        if body > total * 0.5:
+            return "SELL"
+
     return None
 
 
