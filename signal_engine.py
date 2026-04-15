@@ -1,6 +1,5 @@
 import requests
 
-
 TWELVE_DATA_API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
 
 
@@ -14,6 +13,10 @@ def format_price(value):
         return f"{value:.2f}"
     return f"{value:,.2f}"
 
+
+# =========================================================
+# DATA
+# =========================================================
 
 def get_crypto_candles(symbol: str, interval: str, limit: int = 150):
     url = "https://api.binance.com/api/v3/klines"
@@ -85,6 +88,10 @@ def get_multi_timeframe_analysis(market: str, symbol: str):
     raise ValueError(f"Unsupported market: {market}")
 
 
+# =========================================================
+# HELPERS
+# =========================================================
+
 def sma(values, period: int):
     if len(values) < period:
         return sum(values) / max(len(values), 1)
@@ -115,12 +122,22 @@ def get_bias(h1, m15):
     return "NEUTRAL"
 
 
+# =========================================================
+# CANDLE CONFIRMATION
+# =========================================================
+
 def strong_bullish_candle(candle):
     total = max(candle["high"] - candle["low"], 1e-9)
     body = abs(candle["close"] - candle["open"])
     close_near_high = (candle["high"] - candle["close"]) <= total * 0.15
     no_big_upper_wick = (candle["high"] - candle["close"]) <= body * 0.35
-    return candle["close"] > candle["open"] and body >= total * 0.60 and close_near_high and no_big_upper_wick
+
+    return (
+        candle["close"] > candle["open"]
+        and body >= total * 0.60
+        and close_near_high
+        and no_big_upper_wick
+    )
 
 
 def strong_bearish_candle(candle):
@@ -128,7 +145,13 @@ def strong_bearish_candle(candle):
     body = abs(candle["close"] - candle["open"])
     close_near_low = (candle["close"] - candle["low"]) <= total * 0.15
     no_big_lower_wick = (candle["close"] - candle["low"]) <= body * 0.35
-    return candle["close"] < candle["open"] and body >= total * 0.60 and close_near_low and no_big_lower_wick
+
+    return (
+        candle["close"] < candle["open"]
+        and body >= total * 0.60
+        and close_near_low
+        and no_big_lower_wick
+    )
 
 
 def bullish_candle_pattern(candles):
@@ -151,6 +174,10 @@ def bearish_candle_pattern(candles):
     return strong_bearish_candle(last) and last["close"] < prev["low"]
 
 
+# =========================================================
+# STRUCTURE / SMART MONEY
+# =========================================================
+
 def detect_fvg(candles):
     if len(candles) < 3:
         return None
@@ -172,14 +199,14 @@ def detect_sweep(candles):
     prev = candles[-2]
     last = candles[-1]
 
-    # BUY Sweep + Rejection
+    # BUY sweep + rejection
     if last["low"] < prev["low"] and last["close"] > prev["low"]:
         wick = prev["low"] - last["low"]
         body = abs(last["close"] - last["open"])
-        if wick > body:  # echte Rejection
+        if wick > body:
             return "BUY"
 
-    # SELL Sweep + Rejection
+    # SELL sweep + rejection
     if last["high"] > prev["high"] and last["close"] < prev["high"]:
         wick = last["high"] - prev["high"]
         body = abs(last["close"] - last["open"])
@@ -211,19 +238,34 @@ def detect_bos(candles):
     highs = [c["high"] for c in candles[-6:-1]]
     lows = [c["low"] for c in candles[-6:-1]]
 
-    # BUY BOS + Momentum
-    if last["close"] > max(highs):
-        body = abs(last["close"] - last["open"])
-        total = last["high"] - last["low"]
-        if body > total * 0.5:
-            return "BUY"
+    body = abs(last["close"] - last["open"])
+    total = max(last["high"] - last["low"], 1e-9)
 
-    # SELL BOS + Momentum
-    if last["close"] < min(lows):
-        body = abs(last["close"] - last["open"])
-        total = last["high"] - last["low"]
-        if body > total * 0.5:
-            return "SELL"
+    if last["close"] > max(highs) and body > total * 0.50:
+        return "BUY"
+
+    if last["close"] < min(lows) and body > total * 0.50:
+        return "SELL"
+
+    return None
+
+
+def detect_choch(candles):
+    if len(candles) < 8:
+        return None
+
+    closes = [c["close"] for c in candles[-8:]]
+    highs = [c["high"] for c in candles[-8:]]
+    lows = [c["low"] for c in candles[-8:]]
+
+    recent_trend_up = closes[-4] > closes[0]
+    recent_trend_down = closes[-4] < closes[0]
+
+    if recent_trend_down and closes[-1] > max(highs[-5:-1]):
+        return "BUY"
+
+    if recent_trend_up and closes[-1] < min(lows[-5:-1]):
+        return "SELL"
 
     return None
 
@@ -240,23 +282,27 @@ def detect_magnet(m15):
     return hi, lo
 
 
+# =========================================================
+# SL / TP
+# =========================================================
+
 def local_buy_sl(m15, entry):
-    candidates = [
-        recent_low(m15, min(5, len(m15))),
-        recent_low(m15, min(8, len(m15))),
-    ]
-    below = [x for x in candidates if x < entry]
-    return max(below) if below else min(candidates)
+    lows = [c["low"] for c in m15[-10:]]
+    structure_low = min(lows)
+    buffer = entry * 0.002  # 0.2%
+    return structure_low - buffer
 
 
 def local_sell_sl(m15, entry):
-    candidates = [
-        recent_high(m15, min(5, len(m15))),
-        recent_high(m15, min(8, len(m15))),
-    ]
-    above = [x for x in candidates if x > entry]
-    return min(above) if above else max(candidates)
+    highs = [c["high"] for c in m15[-10:]]
+    structure_high = max(highs)
+    buffer = entry * 0.002
+    return structure_high + buffer
 
+
+# =========================================================
+# MAIN ENGINE
+# =========================================================
 
 def evaluate_signal_engine(mtf):
     m5 = mtf["m5"]
@@ -270,6 +316,7 @@ def evaluate_signal_engine(mtf):
     sweep = detect_sweep(m5)
     ob = detect_order_block(m5)
     bos = detect_bos(m5)
+    choch = detect_choch(m5)
 
     fib_618 = calculate_fib_618(h1)
     magnet_up, magnet_down = detect_magnet(m15)
@@ -280,6 +327,7 @@ def evaluate_signal_engine(mtf):
     buy_triggers = 0
     sell_triggers = 0
 
+    # Core triggers
     if fvg == "BUY":
         buy_triggers += 1
     if fvg == "SELL":
@@ -300,6 +348,12 @@ def evaluate_signal_engine(mtf):
     if bos == "SELL":
         sell_triggers += 1
 
+    if choch == "BUY":
+        buy_triggers += 1
+    if choch == "SELL":
+        sell_triggers += 1
+
+    # Magnet / Fib context
     if price < magnet_up:
         buy_triggers += 1
     if price > magnet_down:
@@ -326,44 +380,68 @@ def evaluate_signal_engine(mtf):
     sell_ob = "YES" if ob == "SELL" else "NO"
     buy_sweep = "YES" if sweep == "BUY" else "NO"
     sell_sweep = "YES" if sweep == "SELL" else "NO"
+    buy_bos = "YES" if bos == "BUY" else "NO"
+    sell_bos = "YES" if bos == "SELL" else "NO"
+    buy_choch = "YES" if choch == "BUY" else "NO"
+    sell_choch = "YES" if choch == "SELL" else "NO"
 
-    if bias == "BULLISH" and buy_triggers >= 3 and fvg == "BUY" and buy_pattern:
-        preferred_side = "BUY"
-        signal_type = "BUY ENTRY READY"
-        signal_status = "CONFIRMED BUY"
-        entry_price = price
-        sl_price = local_buy_sl(m15, entry_price)
-        risk = max(entry_price - sl_price, 1e-9)
+    stronger_magnet = "UP" if preferred_side == "BUY" else "DOWN"
 
-        tp1 = entry_price + risk * 1.2
-        tp2 = entry_price + risk * 1.8
+    # New logic:
+    # FVG Pflicht + 1 oder 2 andere + Candle Bestätigung
+    if bias == "BULLISH" and fvg == "BUY" and buy_pattern:
+        extra_buy = sum([
+            sweep == "BUY",
+            ob == "BUY",
+            bos == "BUY",
+            choch == "BUY",
+        ])
 
-        h1_high = recent_high(h1, min(20, len(h1)))
-        if h1_high - entry_price > risk * 2:
-            tp_large = h1_high
-        else:
-            tp_large = entry_price + risk * 2.2
+        if extra_buy >= 1:
+            preferred_side = "BUY"
+            signal_type = "BUY ENTRY READY"
+            signal_status = "CONFIRMED BUY"
+            entry_price = price
+            sl_price = local_buy_sl(m15, entry_price)
+            risk = max(entry_price - sl_price, 1e-9)
 
-        signal_score = 80 + min(buy_triggers * 3, 15)
+            tp1 = entry_price + risk * 1.2
+            tp2 = entry_price + risk * 1.8
 
-    elif bias == "BEARISH" and sell_triggers >= 3 and fvg == "SELL" and sell_pattern:
-        preferred_side = "SELL"
-        signal_type = "SELL ENTRY READY"
-        signal_status = "CONFIRMED SELL"
-        entry_price = price
-        sl_price = local_sell_sl(m15, entry_price)
-        risk = max(sl_price - entry_price, 1e-9)
+            h1_high = recent_high(h1, min(20, len(h1)))
+            if h1_high - entry_price > risk * 2:
+                tp_large = h1_high
+            else:
+                tp_large = entry_price + risk * 2.2
 
-        tp1 = entry_price - risk * 1.2
-        tp2 = entry_price - risk * 1.8
+            signal_score = 80 + min(buy_triggers * 3, 15)
 
-        h1_low = recent_low(h1, min(20, len(h1)))
-        if entry_price - h1_low > risk * 2:
-            tp_large = h1_low
-        else:
-            tp_large = entry_price - risk * 2.2
+    elif bias == "BEARISH" and fvg == "SELL" and sell_pattern:
+        extra_sell = sum([
+            sweep == "SELL",
+            ob == "SELL",
+            bos == "SELL",
+            choch == "SELL",
+        ])
 
-        signal_score = 80 + min(sell_triggers * 3, 15)
+        if extra_sell >= 1:
+            preferred_side = "SELL"
+            signal_type = "SELL ENTRY READY"
+            signal_status = "CONFIRMED SELL"
+            entry_price = price
+            sl_price = local_sell_sl(m15, entry_price)
+            risk = max(sl_price - entry_price, 1e-9)
+
+            tp1 = entry_price - risk * 1.2
+            tp2 = entry_price - risk * 1.8
+
+            h1_low = recent_low(h1, min(20, len(h1)))
+            if entry_price - h1_low > risk * 2:
+                tp_large = h1_low
+            else:
+                tp_large = entry_price - risk * 2.2
+
+            signal_score = 80 + min(sell_triggers * 3, 15)
 
     stronger_magnet = "UP" if preferred_side == "BUY" else "DOWN"
 
@@ -382,6 +460,10 @@ def evaluate_signal_engine(mtf):
         "sell_ob": sell_ob,
         "buy_sweep": buy_sweep,
         "sell_sweep": sell_sweep,
+        "buy_bos": buy_bos,
+        "sell_bos": sell_bos,
+        "buy_choch": buy_choch,
+        "sell_choch": sell_choch,
         "stronger_magnet": stronger_magnet,
         "fib_618": fib_618,
         "trigger_price": price,
