@@ -9,7 +9,6 @@ print("🔥 BOT FILE LOADED", flush=True)
 from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
 
 TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
-
 TELEGRAM_CHAT_ID = "1080439188"
 
 SCAN_SYMBOLS = [
@@ -145,6 +144,8 @@ def build_ai_score(signal: dict, session: str):
             signal.get("buy_fvg"),
             signal.get("buy_ob"),
             signal.get("buy_sweep"),
+            signal.get("buy_bos"),
+            signal.get("buy_choch"),
         )
         if signal.get("stronger_magnet") == "UP":
             trigger_count += 1
@@ -155,6 +156,8 @@ def build_ai_score(signal: dict, session: str):
             signal.get("sell_fvg"),
             signal.get("sell_ob"),
             signal.get("sell_sweep"),
+            signal.get("sell_bos"),
+            signal.get("sell_choch"),
         )
         if signal.get("stronger_magnet") == "DOWN":
             trigger_count += 1
@@ -163,7 +166,7 @@ def build_ai_score(signal: dict, session: str):
     else:
         trigger_count = 0
 
-    base += trigger_count * 8
+    base += trigger_count * 6
 
     if session == "LONDON":
         base += 8
@@ -196,11 +199,12 @@ def build_ai_score(signal: dict, session: str):
 
 
 def build_signal_message(market: str, symbol: str, signal: dict, ai_score: int, session: str, trigger_count: int, rr: float):
+    side = signal.get("preferred_side", "-")
     return (
         f"🔥 {signal['signal_type']}\n\n"
         f"Market: {market.upper()} | Symbol: {symbol}\n"
         f"Session: {session}\n"
-        f"Direction: {signal.get('preferred_side', '-')}\n"
+        f"Direction: {side}\n"
         f"AI Score: {ai_score}\n"
         f"Triggers: {trigger_count}\n"
         f"RR: {rr:.2f}\n\n"
@@ -209,9 +213,12 @@ def build_signal_message(market: str, symbol: str, signal: dict, ai_score: int, 
         f"TP1: {format_price(signal.get('tp1'))}\n"
         f"TP2: {format_price(signal.get('tp2'))}\n"
         f"TP Large: {format_price(signal.get('tp_large'))}\n\n"
-        f"FVG: {signal.get('buy_fvg') if signal.get('preferred_side') == 'BUY' else signal.get('sell_fvg')}\n"
-        f"OB: {signal.get('buy_ob') if signal.get('preferred_side') == 'BUY' else signal.get('sell_ob')}\n"
-        f"Sweep: {signal.get('buy_sweep') if signal.get('preferred_side') == 'BUY' else signal.get('sell_sweep')}\n"
+        f"FVG: {signal.get('buy_fvg') if side == 'BUY' else signal.get('sell_fvg')}\n"
+        f"OB: {signal.get('buy_ob') if side == 'BUY' else signal.get('sell_ob')}\n"
+        f"Sweep: {signal.get('buy_sweep') if side == 'BUY' else signal.get('sell_sweep')}\n"
+        f"BOS: {signal.get('buy_bos') if side == 'BUY' else signal.get('sell_bos')}\n"
+        f"CHOCH: {signal.get('buy_choch') if side == 'BUY' else signal.get('sell_choch')}\n"
+        f"Magnet: {signal.get('stronger_magnet')}\n"
     )
 
 
@@ -323,17 +330,31 @@ def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, t
         return False, "FVG required"
 
     session = active_session_name()
+    side = signal.get("preferred_side", "WAIT")
 
     if session in ["LONDON", "NEW YORK"]:
-        if trigger_count < 3:
-            return False, "Need 3 triggers"
+        # FVG + mindestens 1 anderer richtiger Trigger
+        if side == "BUY":
+            extra = count_yes(signal.get("buy_ob"), signal.get("buy_sweep"), signal.get("buy_bos"), signal.get("buy_choch"))
+        else:
+            extra = count_yes(signal.get("sell_ob"), signal.get("sell_sweep"), signal.get("sell_bos"), signal.get("sell_choch"))
+
+        if extra < 1:
+            return False, "Need FVG + 1 extra trigger"
         if rr < 1.2:
             return False, "RR low"
         if ai_score < MIN_AI_SCORE_MAIN:
             return False, "AI too low"
+
     else:
-        if trigger_count < 4:
-            return False, "Need 4 triggers off session"
+        # off-session strenger
+        if side == "BUY":
+            extra = count_yes(signal.get("buy_ob"), signal.get("buy_sweep"), signal.get("buy_bos"), signal.get("buy_choch"))
+        else:
+            extra = count_yes(signal.get("sell_ob"), signal.get("sell_sweep"), signal.get("sell_bos"), signal.get("sell_choch"))
+
+        if extra < 2:
+            return False, "Off-session needs FVG + 2 extra"
         if rr < 1.4:
             return False, "RR low off session"
         if ai_score < MIN_AI_SCORE_OFF:
