@@ -160,7 +160,6 @@ def bullish_candle_pattern(candles):
 
     prev = candles[-2]
     last = candles[-1]
-
     return strong_bullish_candle(last) and last["close"] > prev["high"]
 
 
@@ -170,7 +169,6 @@ def bearish_candle_pattern(candles):
 
     prev = candles[-2]
     last = candles[-1]
-
     return strong_bearish_candle(last) and last["close"] < prev["low"]
 
 
@@ -199,14 +197,12 @@ def detect_sweep(candles):
     prev = candles[-2]
     last = candles[-1]
 
-    # BUY sweep + rejection
     if last["low"] < prev["low"] and last["close"] > prev["low"]:
         wick = prev["low"] - last["low"]
         body = abs(last["close"] - last["open"])
         if wick > body:
             return "BUY"
 
-    # SELL sweep + rejection
     if last["high"] > prev["high"] and last["close"] < prev["high"]:
         wick = last["high"] - prev["high"]
         body = abs(last["close"] - last["open"])
@@ -237,16 +233,13 @@ def detect_bos(candles):
     last = candles[-1]
     highs = [c["high"] for c in candles[-6:-1]]
     lows = [c["low"] for c in candles[-6:-1]]
-
     body = abs(last["close"] - last["open"])
     total = max(last["high"] - last["low"], 1e-9)
 
     if last["close"] > max(highs) and body > total * 0.50:
         return "BUY"
-
     if last["close"] < min(lows) and body > total * 0.50:
         return "SELL"
-
     return None
 
 
@@ -289,7 +282,7 @@ def detect_magnet(m15):
 def local_buy_sl(m15, entry):
     lows = [c["low"] for c in m15[-10:]]
     structure_low = min(lows)
-    buffer = entry * 0.002  # 0.2%
+    buffer = entry * 0.002
     return structure_low - buffer
 
 
@@ -327,7 +320,6 @@ def evaluate_signal_engine(mtf):
     buy_triggers = 0
     sell_triggers = 0
 
-    # Core triggers
     if fvg == "BUY":
         buy_triggers += 1
     if fvg == "SELL":
@@ -353,7 +345,6 @@ def evaluate_signal_engine(mtf):
     if choch == "SELL":
         sell_triggers += 1
 
-    # Magnet / Fib context
     if price < magnet_up:
         buy_triggers += 1
     if price > magnet_down:
@@ -385,10 +376,12 @@ def evaluate_signal_engine(mtf):
     buy_choch = "YES" if choch == "BUY" else "NO"
     sell_choch = "YES" if choch == "SELL" else "NO"
 
-    stronger_magnet = "UP" if preferred_side == "BUY" else "DOWN"
+    # =====================================================
+    # BUY SETUP
+    # FVG Pflicht + mindestens 1 extra Trigger + Candle
+    # Sweep = größerer Score + größere TP
+    # =====================================================
 
-    # New logic:
-    # FVG Pflicht + 1 oder 2 andere + Candle Bestätigung
     if bias == "BULLISH" and fvg == "BUY" and buy_pattern:
         extra_buy = sum([
             sweep == "BUY",
@@ -405,16 +398,30 @@ def evaluate_signal_engine(mtf):
             sl_price = local_buy_sl(m15, entry_price)
             risk = max(entry_price - sl_price, 1e-9)
 
-            tp1 = entry_price + risk * 1.2
-            tp2 = entry_price + risk * 1.8
+            # Sweep-based TP / Score
+            if sweep == "BUY":
+                tp1 = entry_price + risk * 1.2
+                tp2 = entry_price + risk * 2.0
 
-            h1_high = recent_high(h1, min(20, len(h1)))
-            if h1_high - entry_price > risk * 2:
-                tp_large = h1_high
+                if bos == "BUY" and choch == "BUY":
+                    tp_large = entry_price + risk * 3.0
+                else:
+                    h1_high = recent_high(h1, min(20, len(h1)))
+                    tp_large = max(h1_high, entry_price + risk * 2.5)
+
+                signal_score = 95 + min(buy_triggers * 2, 5)
+
             else:
-                tp_large = entry_price + risk * 2.2
+                tp1 = entry_price + risk * 1.0
+                tp2 = entry_price + risk * 1.5
+                tp_large = entry_price + risk * 1.8
+                signal_score = 80 + min(buy_triggers * 2, 5) - 12
 
-            signal_score = 80 + min(buy_triggers * 3, 15)
+    # =====================================================
+    # SELL SETUP
+    # FVG Pflicht + mindestens 1 extra Trigger + Candle
+    # Sweep = größerer Score + größere TP
+    # =====================================================
 
     elif bias == "BEARISH" and fvg == "SELL" and sell_pattern:
         extra_sell = sum([
@@ -432,16 +439,23 @@ def evaluate_signal_engine(mtf):
             sl_price = local_sell_sl(m15, entry_price)
             risk = max(sl_price - entry_price, 1e-9)
 
-            tp1 = entry_price - risk * 1.2
-            tp2 = entry_price - risk * 1.8
+            if sweep == "SELL":
+                tp1 = entry_price - risk * 1.2
+                tp2 = entry_price - risk * 2.0
 
-            h1_low = recent_low(h1, min(20, len(h1)))
-            if entry_price - h1_low > risk * 2:
-                tp_large = h1_low
+                if bos == "SELL" and choch == "SELL":
+                    tp_large = entry_price - risk * 3.0
+                else:
+                    h1_low = recent_low(h1, min(20, len(h1)))
+                    tp_large = min(h1_low, entry_price - risk * 2.5)
+
+                signal_score = 95 + min(sell_triggers * 2, 5)
+
             else:
-                tp_large = entry_price - risk * 2.2
-
-            signal_score = 80 + min(sell_triggers * 3, 15)
+                tp1 = entry_price - risk * 1.0
+                tp2 = entry_price - risk * 1.5
+                tp_large = entry_price - risk * 1.8
+                signal_score = 80 + min(sell_triggers * 2, 5) - 12
 
     stronger_magnet = "UP" if preferred_side == "BUY" else "DOWN"
 
@@ -467,5 +481,5 @@ def evaluate_signal_engine(mtf):
         "stronger_magnet": stronger_magnet,
         "fib_618": fib_618,
         "trigger_price": price,
-        "signal_score": signal_score,
+        "signal_score": max(signal_score, 0),
     }
