@@ -13,6 +13,10 @@ TELEGRAM_CHAT_ID = "@magnet_0510"
 
 SCAN_SYMBOLS = [
     ("forex", "XAU/USD"),
+    ("forex", "EUR/USD"),
+    ("forex", "GBP/USD"),
+    ("forex", "USD/JPY"),
+    ("forex", "AUD/USD"),
 ]
 
 SCAN_INTERVAL_SECONDS = 300
