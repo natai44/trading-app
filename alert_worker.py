@@ -21,6 +21,10 @@ MIN_SIGNAL_GAP_SECONDS = 5400
 OPPOSITE_LOCK_SECONDS = 14400
 STATE_FILE = "bot_state.json"
 
+# BASIC SETUP TRACKING
+SETUP_EXPIRY_SECONDS = 60 * 60 * 4   # 4 Stunden
+EARLY_MOVE_R_MULTIPLIER = 0.70       # ~0.7R Bewegung ohne Entry-Bestätigung
+
 
 def utc_now():
     return datetime.now(timezone.utc)
@@ -38,6 +42,7 @@ def default_state():
         "last_signal_side": {},
         "last_signal_score": {},
         "last_wait_time": {},
+        "tracked_setups": {},
         "open_trades": {},
         "stats": {
             "signals_sent": 0,
@@ -48,6 +53,9 @@ def default_state():
             "tp2_hits": 0,
             "tp_large_hits": 0,
             "closed_trades": 0,
+            "waits_sent": 0,
+            "missed_setups": 0,
+            "early_moves": 0,
         },
     }
 
@@ -61,6 +69,17 @@ def load_state():
         if data.get("daily_date") != today_key():
             data["daily_date"] = today_key()
             data["daily_count"] = 0
+
+        if "tracked_setups" not in data:
+            data["tracked_setups"] = {}
+
+        stats = data.get("stats", {})
+        defaults = default_state()["stats"]
+        for key, value in defaults.items():
+            if key not in stats:
+                stats[key] = value
+        data["stats"] = stats
+
         return data
     except Exception as exc:
         print("load_state error:", exc, flush=True)
@@ -185,6 +204,24 @@ def build_ready_message(market: str, symbol: str, signal: dict, ai_score: int, s
     )
 
 
+def build_missed_message(symbol: str, side: str):
+    return (
+        f"❌ SETUP MISSED\n\n"
+        f"{symbol} {side}\n\n"
+        f"Price did not give a valid confirmed entry in time.\n"
+        f"Setup expired."
+    )
+
+
+def build_early_move_message(symbol: str, side: str, price: float):
+    return (
+        f"⚠️ EARLY MOVE\n\n"
+        f"{symbol} {side}\n\n"
+        f"Price moved in the expected direction without valid candle confirmation.\n"
+        f"Current Price: {format_price(price)}"
+    )
+
+
 def send_stats():
     s = STATE["stats"]
     winrate = (s["wins"] / s["closed_trades"] * 100) if s["closed_trades"] > 0 else 0.0
@@ -198,6 +235,9 @@ def send_stats():
         f"TP1 Hits: {s['tp1_hits']}\n"
         f"TP2 Hits: {s['tp2_hits']}\n"
         f"TP Large Hits: {s['tp_large_hits']}\n"
+        f"WAIT Signals: {s['waits_sent']}\n"
+        f"Missed Setups: {s['missed_setups']}\n"
+        f"Early Moves: {s['early_moves']}\n"
         f"Winrate: {winrate:.1f}%"
     )
     send_telegram(msg)
@@ -224,6 +264,91 @@ def register_open_trade(market: str, symbol: str, signal: dict, ai_score: int):
         "closed": False,
     }
     save_state()
+
+
+def register_wait_setup(market: str, symbol: str, signal: dict):
+    key = trade_key(market, symbol)
+    planned_entry = safe_float(signal.get("wait_entry_price"))
+    zone_low = safe_float(signal.get("wait_zone_low"))
+    zone_high = safe_float(signal.get("wait_zone_high"))
+    side = signal.get("preferred_side", "WAIT")
+
+    if not planned_entry or not zone_low or not zone_high:
+        return
+
+    if side == "BUY":
+        est_sl = zone_low - planned_entry * 0.002
+        est_risk = max(planned_entry - est_sl, 1e-9)
+    else:
+        est_sl = zone_high + planned_entry * 0.002
+        est_risk = max(est_sl - planned_entry, 1e-9)
+
+    STATE["tracked_setups"][key] = {
+        "market": market,
+        "symbol": symbol,
+        "side": side,
+        "mode": signal.get("setup_mode", "NONE"),
+        "created_at": int(time.time()),
+        "planned_entry": planned_entry,
+        "zone_low": zone_low,
+        "zone_high": zone_high,
+        "estimated_sl": est_sl,
+        "estimated_risk": est_risk,
+        "status": "WAIT",
+        "early_move_sent": False,
+    }
+    save_state()
+
+
+def clear_tracked_setup(market: str, symbol: str):
+    key = trade_key(market, symbol)
+    if key in STATE["tracked_setups"]:
+        del STATE["tracked_setups"][key]
+        save_state()
+
+
+def maybe_track_setup_outcome(market: str, symbol: str, signal: dict):
+    key = trade_key(market, symbol)
+    setup = STATE["tracked_setups"].get(key)
+    if not setup:
+        return
+
+    if setup.get("status") != "WAIT":
+        return
+
+    now_ts = int(time.time())
+    current_price = safe_float(signal.get("trigger_price"))
+    side = setup["side"]
+    planned_entry = safe_float(setup["planned_entry"])
+    est_risk = safe_float(setup["estimated_risk"], 0.0)
+
+    # READY -> tracked setup beenden
+    if signal.get("signal_type") in ["BUY ENTRY READY", "SELL ENTRY READY"]:
+        setup["status"] = "READY"
+        clear_tracked_setup(market, symbol)
+        return
+
+    # EARLY MOVE
+    if est_risk > 0 and not setup.get("early_move_sent"):
+        if side == "BUY":
+            moved = current_price >= planned_entry + est_risk * EARLY_MOVE_R_MULTIPLIER
+        else:
+            moved = current_price <= planned_entry - est_risk * EARLY_MOVE_R_MULTIPLIER
+
+        if moved:
+            setup["early_move_sent"] = True
+            setup["status"] = "EARLY_MOVE"
+            STATE["stats"]["early_moves"] += 1
+            send_telegram(build_early_move_message(symbol, side, current_price))
+            save_state()
+            return
+
+    # MISSED
+    if now_ts - setup["created_at"] >= SETUP_EXPIRY_SECONDS:
+        setup["status"] = "MISSED"
+        STATE["stats"]["missed_setups"] += 1
+        send_telegram(build_missed_message(symbol, side))
+        clear_tracked_setup(market, symbol)
 
 
 def maybe_extend_trade(trade: dict, signal: dict):
@@ -366,6 +491,11 @@ def can_send_wait_signal(market: str, symbol: str, signal: dict):
     now_ts = time.time()
     last_wait = STATE["last_wait_time"].get(key, 0)
 
+    # kein neues WAIT wenn schon aktives WAIT läuft
+    existing = STATE["tracked_setups"].get(key)
+    if existing and existing.get("status") == "WAIT":
+        return False, "Existing wait active"
+
     if now_ts - last_wait < 3600:
         return False, "Wait cooldown"
 
@@ -410,7 +540,7 @@ def can_send_ready_signal(market: str, symbol: str, signal: dict, ai_score: int)
 
 
 def run():
-    print("🔥 BOT V6 RUNNING", flush=True)
+    print("🔥 BOT V7 RUNNING", flush=True)
 
     while True:
         try:
@@ -434,19 +564,22 @@ def run():
                     print("DEBUG SIGNAL:", symbol, signal, flush=True)
 
                     maybe_update_open_trade(market, symbol, signal)
+                    maybe_track_setup_outcome(market, symbol, signal)
 
                     ai_score, trigger_count, rr = build_ai_score(signal, session)
                     print(f"DEBUG SCORE: {symbol} ai={ai_score} triggers={trigger_count} rr={rr:.2f}", flush=True)
 
-                    # WAIT signal
+                    # WAIT
                     wait_allowed, wait_reason = can_send_wait_signal(market, symbol, signal)
                     if signal.get("signal_type") in ["WAIT ENTRY BUY", "WAIT ENTRY SELL"] and wait_allowed:
                         send_telegram(build_wait_message(market, symbol, signal, ai_score, session))
                         STATE["last_wait_time"][trade_key(market, symbol)] = int(time.time())
+                        STATE["stats"]["waits_sent"] += 1
+                        register_wait_setup(market, symbol, signal)
                         save_state()
                         print("👀 WAIT SENT:", symbol, flush=True)
 
-                    # READY signal
+                    # READY
                     ready_allowed, ready_reason = can_send_ready_signal(market, symbol, signal, ai_score)
                     if not ready_allowed:
                         print(symbol, "blocked:", ready_reason, flush=True)
@@ -462,6 +595,7 @@ def run():
                     STATE["stats"]["signals_sent"] += 1
 
                     register_open_trade(market, symbol, signal, ai_score)
+                    clear_tracked_setup(market, symbol)
 
                     if STATE["stats"]["signals_sent"] % 3 == 0:
                         send_stats()
