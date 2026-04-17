@@ -16,11 +16,9 @@ SCAN_SYMBOLS = [
 ]
 
 SCAN_INTERVAL_SECONDS = 300
-MAX_SIGNALS_PER_DAY = 2
+MAX_SIGNALS_PER_DAY = 3
 MIN_SIGNAL_GAP_SECONDS = 5400
 OPPOSITE_LOCK_SECONDS = 14400
-MIN_AI_SCORE_MAIN = 85
-MIN_AI_SCORE_OFF = 90
 STATE_FILE = "bot_state.json"
 
 
@@ -39,14 +37,17 @@ def default_state():
         "last_signal_time": {},
         "last_signal_side": {},
         "last_signal_score": {},
+        "last_wait_time": {},
         "open_trades": {},
         "stats": {
+            "signals_sent": 0,
             "wins": 0,
             "losses": 0,
+            "breakeven": 0,
             "tp1_hits": 0,
             "tp2_hits": 0,
-            "break_even_hits": 0,
-            "signals_sent": 0,
+            "tp_large_hits": 0,
+            "closed_trades": 0,
         },
     }
 
@@ -87,10 +88,7 @@ def active_session_name():
 
 def avoid_news_window():
     minute = utc_now().minute
-    return (
-        minute in [25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
-        or minute in [55, 56, 57, 58, 59, 0, 1, 2, 3, 4, 5]
-    )
+    return minute in [25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 55, 56, 57, 58, 59, 0, 1, 2, 3, 4, 5]
 
 
 def send_telegram(text: str):
@@ -99,7 +97,7 @@ def send_telegram(text: str):
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=8)
+        r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
         print("Telegram:", r.status_code, r.text[:120], flush=True)
     except Exception as exc:
         print("Telegram error:", exc, flush=True)
@@ -112,61 +110,24 @@ def safe_float(x, default=0.0):
         return default
 
 
-def count_yes(*values):
-    return sum(1 for v in values if str(v).upper() == "YES")
-
-
 def trade_key(market: str, symbol: str):
     return f"{market}:{symbol}"
 
 
-def fvg_required(signal: dict):
-    side = signal.get("preferred_side", "WAIT")
-    if side == "BUY":
-        return signal.get("buy_fvg") == "YES"
-    if side == "SELL":
-        return signal.get("sell_fvg") == "YES"
-    return False
-
-
 def build_ai_score(signal: dict, session: str):
-    side = signal.get("preferred_side", "WAIT")
-    base = 0
+    st = signal.get("signal_type", "")
+    if st == "NO CLEAR SETUP":
+        return 0, 0, 0.0
 
-    if signal.get("signal_type") in ["BUY ENTRY READY", "SELL ENTRY READY"]:
-        base += 35
+    base = safe_float(signal.get("signal_score"))
+    mode = signal.get("setup_mode", "NONE")
 
-    if signal.get("signal_status") in ["CONFIRMED BUY", "CONFIRMED SELL"]:
-        base += 15
-
-    if side == "BUY":
-        trigger_count = count_yes(
-            signal.get("buy_fvg"),
-            signal.get("buy_ob"),
-            signal.get("buy_sweep"),
-            signal.get("buy_bos"),
-            signal.get("buy_choch"),
-        )
-        if signal.get("stronger_magnet") == "UP":
-            trigger_count += 1
-        if signal.get("fib_618") not in [None, "-"]:
-            trigger_count += 1
-    elif side == "SELL":
-        trigger_count = count_yes(
-            signal.get("sell_fvg"),
-            signal.get("sell_ob"),
-            signal.get("sell_sweep"),
-            signal.get("sell_bos"),
-            signal.get("sell_choch"),
-        )
-        if signal.get("stronger_magnet") == "DOWN":
-            trigger_count += 1
-        if signal.get("fib_618") not in [None, "-"]:
-            trigger_count += 1
+    if mode == "FULL":
+        triggers = 3
+    elif mode == "SAFE":
+        triggers = 2
     else:
-        trigger_count = 0
-
-    base += trigger_count * 6
+        triggers = 1
 
     if session == "LONDON":
         base += 8
@@ -175,36 +136,43 @@ def build_ai_score(signal: dict, session: str):
     else:
         base += 2
 
-    tp1 = safe_float(signal.get("tp1"))
+    rr = 0.0
     entry = safe_float(signal.get("entry_price"))
     sl = safe_float(signal.get("sl_price"))
-    rr = 0.0
+    tp1 = safe_float(signal.get("tp1"))
+    side = signal.get("preferred_side")
 
-    if side == "BUY" and entry > sl:
-        rr = (tp1 - entry) / max(entry - sl, 1e-9)
-    elif side == "SELL" and sl > entry:
-        rr = (entry - tp1) / max(sl - entry, 1e-9)
+    if entry and sl and tp1:
+        if side == "BUY" and entry > sl:
+            rr = (tp1 - entry) / max(entry - sl, 1e-9)
+        elif side == "SELL" and sl > entry:
+            rr = (entry - tp1) / max(sl - entry, 1e-9)
 
-    if rr >= 1.8:
-        base += 14
-    elif rr >= 1.5:
-        base += 10
-    elif rr >= 1.2:
-        base += 6
-
-    raw_score = safe_float(signal.get("signal_score"))
-    base += min(int(raw_score / 8), 12)
-
-    return min(base, 100), trigger_count, rr
+    return min(int(base), 100), triggers, rr
 
 
-def build_signal_message(market: str, symbol: str, signal: dict, ai_score: int, session: str, trigger_count: int, rr: float):
+def build_wait_message(market: str, symbol: str, signal: dict, ai_score: int, session: str):
     side = signal.get("preferred_side", "-")
+    return (
+        f"👀 {signal['signal_type']}\n\n"
+        f"Market: {market.upper()} | Symbol: {symbol}\n"
+        f"Session: {session}\n"
+        f"Direction: {side}\n"
+        f"Mode: {signal.get('setup_mode', '-')}\n"
+        f"AI Score: {ai_score}\n\n"
+        f"Wait Zone: {format_price(signal.get('wait_zone_low'))} - {format_price(signal.get('wait_zone_high'))}\n"
+        f"Planned Entry: {format_price(signal.get('wait_entry_price'))}\n\n"
+        f"Bot will wait for zone + candle confirmation."
+    )
+
+
+def build_ready_message(market: str, symbol: str, signal: dict, ai_score: int, session: str, trigger_count: int, rr: float):
     return (
         f"🔥 {signal['signal_type']}\n\n"
         f"Market: {market.upper()} | Symbol: {symbol}\n"
         f"Session: {session}\n"
-        f"Direction: {side}\n"
+        f"Direction: {signal.get('preferred_side', '-')}\n"
+        f"Mode: {signal.get('setup_mode', '-')}\n"
         f"AI Score: {ai_score}\n"
         f"Triggers: {trigger_count}\n"
         f"RR: {rr:.2f}\n\n"
@@ -213,31 +181,26 @@ def build_signal_message(market: str, symbol: str, signal: dict, ai_score: int, 
         f"TP1: {format_price(signal.get('tp1'))}\n"
         f"TP2: {format_price(signal.get('tp2'))}\n"
         f"TP Large: {format_price(signal.get('tp_large'))}\n\n"
-        f"FVG: {signal.get('buy_fvg') if side == 'BUY' else signal.get('sell_fvg')}\n"
-        f"OB: {signal.get('buy_ob') if side == 'BUY' else signal.get('sell_ob')}\n"
-        f"Sweep: {signal.get('buy_sweep') if side == 'BUY' else signal.get('sell_sweep')}\n"
-        f"BOS: {signal.get('buy_bos') if side == 'BUY' else signal.get('sell_bos')}\n"
-        f"CHOCH: {signal.get('buy_choch') if side == 'BUY' else signal.get('sell_choch')}\n"
-        f"Magnet: {signal.get('stronger_magnet')}\n"
+        f"Confirmation: zone touched + candle confirmed"
     )
 
 
 def send_stats():
-    wins = STATE["stats"]["wins"]
-    losses = STATE["stats"]["losses"]
-    total = wins + losses
-    winrate = (wins / total * 100) if total > 0 else 0.0
-
-    send_telegram(
+    s = STATE["stats"]
+    winrate = (s["wins"] / s["closed_trades"] * 100) if s["closed_trades"] > 0 else 0.0
+    msg = (
         f"📊 BOT STATS\n"
-        f"Signals Sent: {STATE['stats']['signals_sent']}\n"
-        f"Wins: {wins}\n"
-        f"Losses: {losses}\n"
-        f"TP1 Hits: {STATE['stats']['tp1_hits']}\n"
-        f"TP2 Hits: {STATE['stats']['tp2_hits']}\n"
-        f"Break-even Moves: {STATE['stats']['break_even_hits']}\n"
+        f"Signals Sent: {s['signals_sent']}\n"
+        f"Closed Trades: {s['closed_trades']}\n"
+        f"Wins: {s['wins']}\n"
+        f"Losses: {s['losses']}\n"
+        f"Break-even: {s['breakeven']}\n"
+        f"TP1 Hits: {s['tp1_hits']}\n"
+        f"TP2 Hits: {s['tp2_hits']}\n"
+        f"TP Large Hits: {s['tp_large_hits']}\n"
         f"Winrate: {winrate:.1f}%"
     )
+    send_telegram(msg)
 
 
 def register_open_trade(market: str, symbol: str, signal: dict, ai_score: int):
@@ -246,6 +209,7 @@ def register_open_trade(market: str, symbol: str, signal: dict, ai_score: int):
         "market": market,
         "symbol": symbol,
         "side": signal["preferred_side"],
+        "mode": signal.get("setup_mode", "NONE"),
         "entry": safe_float(signal.get("entry_price")),
         "sl": safe_float(signal.get("sl_price")),
         "tp1": safe_float(signal.get("tp1")),
@@ -254,14 +218,46 @@ def register_open_trade(market: str, symbol: str, signal: dict, ai_score: int):
         "ai_score": ai_score,
         "created_at": int(time.time()),
         "tp1_sent": False,
+        "tp2_sent": False,
+        "tp_large_sent": False,
+        "extended_count": 0,
         "closed": False,
     }
     save_state()
 
 
+def maybe_extend_trade(trade: dict, signal: dict):
+    if trade["extended_count"] >= 2:
+        return False
+
+    side = trade["side"]
+    price = safe_float(signal.get("trigger_price"))
+
+    if side == "BUY" and price > trade["tp2"]:
+        old_tp = trade["tp_large"]
+        new_tp = max(old_tp, price + (price - trade["entry"]) * 0.8)
+        if new_tp > old_tp:
+            trade["tp_large"] = new_tp
+            trade["sl"] = max(trade["sl"], price - price * 0.002)
+            trade["extended_count"] += 1
+            return True
+
+    if side == "SELL" and price < trade["tp2"]:
+        old_tp = trade["tp_large"]
+        new_tp = min(old_tp, price - (trade["entry"] - price) * 0.8)
+        if new_tp < old_tp:
+            trade["tp_large"] = new_tp
+            trade["sl"] = min(trade["sl"], price + price * 0.002)
+            trade["extended_count"] += 1
+            return True
+
+    return False
+
+
 def maybe_update_open_trade(market: str, symbol: str, signal: dict):
     key = trade_key(market, symbol)
     trade = STATE["open_trades"].get(key)
+
     if not trade or trade.get("closed"):
         return
 
@@ -272,45 +268,88 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
         trade["tp1_sent"] = True
         trade["sl"] = trade["entry"]
         STATE["stats"]["tp1_hits"] += 1
-        STATE["stats"]["break_even_hits"] += 1
-        send_telegram(f"🎯 TP1 HIT\n\n{symbol} BUY\nSL moved to Break Even.")
+        send_telegram(
+            f"🎯 TP1 HIT\n\n"
+            f"{symbol} BUY\n"
+            f"Small profit secured.\n"
+            f"SL moved to Break Even."
+        )
 
     if side == "SELL" and not trade["tp1_sent"] and price <= trade["tp1"]:
         trade["tp1_sent"] = True
         trade["sl"] = trade["entry"]
         STATE["stats"]["tp1_hits"] += 1
-        STATE["stats"]["break_even_hits"] += 1
-        send_telegram(f"🎯 TP1 HIT\n\n{symbol} SELL\nSL moved to Break Even.")
+        send_telegram(
+            f"🎯 TP1 HIT\n\n"
+            f"{symbol} SELL\n"
+            f"Small profit secured.\n"
+            f"SL moved to Break Even."
+        )
 
-    if trade["tp1_sent"] and not trade["closed"]:
-        if side == "BUY" and price > trade["tp2"]:
-            trade["sl"] = max(trade["sl"], price - price * 0.002)
-        if side == "SELL" and price < trade["tp2"]:
-            trade["sl"] = min(trade["sl"], price + price * 0.002)
-
-    if side == "BUY" and price >= trade["tp_large"]:
-        trade["closed"] = True
+    if side == "BUY" and not trade["tp2_sent"] and price >= trade["tp2"]:
+        trade["tp2_sent"] = True
         STATE["stats"]["tp2_hits"] += 1
+        trade["sl"] = max(trade["sl"], price - price * 0.002)
+        send_telegram(
+            f"🚀 TP2 HIT\n\n"
+            f"{symbol} BUY\n"
+            f"Trade still running.\n"
+            f"SL trailed to: {format_price(trade['sl'])}"
+        )
+
+    if side == "SELL" and not trade["tp2_sent"] and price <= trade["tp2"]:
+        trade["tp2_sent"] = True
+        STATE["stats"]["tp2_hits"] += 1
+        trade["sl"] = min(trade["sl"], price + price * 0.002)
+        send_telegram(
+            f"🚀 TP2 HIT\n\n"
+            f"{symbol} SELL\n"
+            f"Trade still running.\n"
+            f"SL trailed to: {format_price(trade['sl'])}"
+        )
+
+    if trade["tp2_sent"] and not trade["closed"]:
+        extended = maybe_extend_trade(trade, signal)
+        if extended:
+            send_telegram(
+                f"🔁 TRADE UPDATE\n\n"
+                f"{symbol} {side}\n"
+                f"Market keeps running.\n"
+                f"New TP Large: {format_price(trade['tp_large'])}\n"
+                f"New SL: {format_price(trade['sl'])}"
+            )
+
+    if side == "BUY" and not trade["tp_large_sent"] and price >= trade["tp_large"]:
+        trade["tp_large_sent"] = True
+        trade["closed"] = True
+        STATE["stats"]["tp_large_hits"] += 1
         STATE["stats"]["wins"] += 1
+        STATE["stats"]["closed_trades"] += 1
         send_telegram(f"🏁 TP LARGE HIT\n\n{symbol} BUY")
 
-    elif side == "SELL" and price <= trade["tp_large"]:
+    if side == "SELL" and not trade["tp_large_sent"] and price <= trade["tp_large"]:
+        trade["tp_large_sent"] = True
         trade["closed"] = True
-        STATE["stats"]["tp2_hits"] += 1
+        STATE["stats"]["tp_large_hits"] += 1
         STATE["stats"]["wins"] += 1
+        STATE["stats"]["closed_trades"] += 1
         send_telegram(f"🏁 TP LARGE HIT\n\n{symbol} SELL")
 
-    elif side == "BUY" and not trade["closed"] and price <= trade["sl"]:
+    if side == "BUY" and not trade["closed"] and price <= trade["sl"]:
         trade["closed"] = True
+        STATE["stats"]["closed_trades"] += 1
         if trade["tp1_sent"]:
+            STATE["stats"]["breakeven"] += 1
             send_telegram(f"🔁 BREAK EVEN EXIT\n\n{symbol} BUY")
         else:
             STATE["stats"]["losses"] += 1
             send_telegram(f"❌ STOP LOSS HIT\n\n{symbol} BUY")
 
-    elif side == "SELL" and not trade["closed"] and price >= trade["sl"]:
+    if side == "SELL" and not trade["closed"] and price >= trade["sl"]:
         trade["closed"] = True
+        STATE["stats"]["closed_trades"] += 1
         if trade["tp1_sent"]:
+            STATE["stats"]["breakeven"] += 1
             send_telegram(f"🔁 BREAK EVEN EXIT\n\n{symbol} SELL")
         else:
             STATE["stats"]["losses"] += 1
@@ -319,46 +358,30 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
     save_state()
 
 
-def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, trigger_count: int, rr: float):
+def can_send_wait_signal(market: str, symbol: str, signal: dict):
+    if signal.get("signal_type") not in ["WAIT ENTRY BUY", "WAIT ENTRY SELL"]:
+        return False, "Not wait signal"
+
+    key = trade_key(market, symbol)
+    now_ts = time.time()
+    last_wait = STATE["last_wait_time"].get(key, 0)
+
+    if now_ts - last_wait < 3600:
+        return False, "Wait cooldown"
+
+    open_trade = STATE["open_trades"].get(key)
+    if open_trade and not open_trade.get("closed"):
+        return False, "Trade already open"
+
+    return True, "OK"
+
+
+def can_send_ready_signal(market: str, symbol: str, signal: dict, ai_score: int):
     if signal.get("signal_type") not in ["BUY ENTRY READY", "SELL ENTRY READY"]:
         return False, "No confirmed entry"
 
     if avoid_news_window():
         return False, "News blocked"
-
-    if not fvg_required(signal):
-        return False, "FVG required"
-
-    session = active_session_name()
-    side = signal.get("preferred_side", "WAIT")
-
-    if session in ["LONDON", "NEW YORK"]:
-        # FVG + mindestens 1 anderer richtiger Trigger
-        if side == "BUY":
-            extra = count_yes(signal.get("buy_ob"), signal.get("buy_sweep"), signal.get("buy_bos"), signal.get("buy_choch"))
-        else:
-            extra = count_yes(signal.get("sell_ob"), signal.get("sell_sweep"), signal.get("sell_bos"), signal.get("sell_choch"))
-
-        if extra < 1:
-            return False, "Need FVG + 1 extra trigger"
-        if rr < 1.2:
-            return False, "RR low"
-        if ai_score < MIN_AI_SCORE_MAIN:
-            return False, "AI too low"
-
-    else:
-        # off-session strenger
-        if side == "BUY":
-            extra = count_yes(signal.get("buy_ob"), signal.get("buy_sweep"), signal.get("buy_bos"), signal.get("buy_choch"))
-        else:
-            extra = count_yes(signal.get("sell_ob"), signal.get("sell_sweep"), signal.get("sell_bos"), signal.get("sell_choch"))
-
-        if extra < 2:
-            return False, "Off-session needs FVG + 2 extra"
-        if rr < 1.4:
-            return False, "RR low off session"
-        if ai_score < MIN_AI_SCORE_OFF:
-            return False, "AI too low off session"
 
     if STATE["daily_count"] >= MAX_SIGNALS_PER_DAY:
         return False, "Daily max reached"
@@ -376,11 +399,8 @@ def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, t
     if last_side and last_side != current_side and now_ts - last_time < OPPOSITE_LOCK_SECONDS:
         return False, "Opposite locked"
 
-    if last_side == current_side:
-        if ai_score <= last_score + 5:
-            return False, "Not stronger"
-        send_telegram(f"🔁 SIGNAL UPDATE\n\n{symbol}\nDirection: {current_side}\nBetter setup detected.")
-        return False, "Updated"
+    if last_side == current_side and ai_score <= last_score + 5:
+        return False, "Not stronger"
 
     open_trade = STATE["open_trades"].get(key)
     if open_trade and not open_trade.get("closed"):
@@ -390,7 +410,7 @@ def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, t
 
 
 def run():
-    print("🔥 BOT V4 RUNNING", flush=True)
+    print("🔥 BOT V6 RUNNING", flush=True)
 
     while True:
         try:
@@ -407,6 +427,7 @@ def run():
             for market, symbol in SCAN_SYMBOLS:
                 try:
                     print(f"Scanning {market} {symbol} ...", flush=True)
+
                     mtf = get_multi_timeframe_analysis(market, symbol)
                     signal = evaluate_signal_engine(mtf)
 
@@ -417,12 +438,21 @@ def run():
                     ai_score, trigger_count, rr = build_ai_score(signal, session)
                     print(f"DEBUG SCORE: {symbol} ai={ai_score} triggers={trigger_count} rr={rr:.2f}", flush=True)
 
-                    allowed, reason = can_send_new_signal(market, symbol, signal, ai_score, trigger_count, rr)
-                    if not allowed:
-                        print(symbol, "blocked:", reason, flush=True)
+                    # WAIT signal
+                    wait_allowed, wait_reason = can_send_wait_signal(market, symbol, signal)
+                    if signal.get("signal_type") in ["WAIT ENTRY BUY", "WAIT ENTRY SELL"] and wait_allowed:
+                        send_telegram(build_wait_message(market, symbol, signal, ai_score, session))
+                        STATE["last_wait_time"][trade_key(market, symbol)] = int(time.time())
+                        save_state()
+                        print("👀 WAIT SENT:", symbol, flush=True)
+
+                    # READY signal
+                    ready_allowed, ready_reason = can_send_ready_signal(market, symbol, signal, ai_score)
+                    if not ready_allowed:
+                        print(symbol, "blocked:", ready_reason, flush=True)
                         continue
 
-                    send_telegram(build_signal_message(market, symbol, signal, ai_score, session, trigger_count, rr))
+                    send_telegram(build_ready_message(market, symbol, signal, ai_score, session, trigger_count, rr))
 
                     key = trade_key(market, symbol)
                     STATE["last_signal_time"][key] = int(time.time())
@@ -436,7 +466,8 @@ def run():
                     if STATE["stats"]["signals_sent"] % 3 == 0:
                         send_stats()
 
-                    print("✅ SIGNAL SENT:", symbol, flush=True)
+                    save_state()
+                    print("✅ READY SIGNAL SENT:", symbol, flush=True)
 
                 except Exception as exc:
                     print("Worker symbol error:", symbol, exc, flush=True)
