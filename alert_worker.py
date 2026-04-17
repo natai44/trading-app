@@ -8,7 +8,7 @@ print("🔥 BOT FILE LOADED", flush=True)
 
 from signal_engine import get_multi_timeframe_analysis, evaluate_signal_engine, format_price
 
-TELEGRAM_BOT_TOKEN = "8f8f55c79aa54b789bd3177ce55e224e"
+TELEGRAM_BOT_TOKEN = "8785866877:AAHM-tze7VEOWcxGGcsVg0dWadheZX_Bhlw"
 TELEGRAM_CHAT_ID = "@magnet_0510"
 
 SCAN_SYMBOLS = [
