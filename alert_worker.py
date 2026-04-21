@@ -247,7 +247,6 @@ def maybe_extend_trade(trade: dict, signal: dict):
     price = safe_float(signal.get("trigger_price"))
     side = trade["side"]
 
-    # only extend if market already clearly beyond TP2
     if side == "BUY" and price > trade["tp2"]:
         old_tp = trade["tp_large"]
         new_tp = max(old_tp, price + (price - trade["entry"]) * 0.8)
@@ -277,7 +276,11 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
     if not trade or trade.get("closed"):
         return
 
-    price = safe_float(signal.get("trigger_price"))
+    price_raw = signal.get("trigger_price")
+    if price_raw is None:
+        return
+
+    price = safe_float(price_raw)
     side = trade["side"]
 
     # TP1 -> secure small gain / BE
