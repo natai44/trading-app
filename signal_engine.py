@@ -3,6 +3,7 @@ import requests
 BASE_URL = "https://api.twelvedata.com"
 API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
 
+
 def get_candles(symbol, interval, outputsize=100):
     url = f"{BASE_URL}/time_series"
     params = {
@@ -14,8 +15,9 @@ def get_candles(symbol, interval, outputsize=100):
     try:
         r = requests.get(url, params=params, timeout=10)
         return r.json().get("values", [])
-    except:
+    except Exception:
         return []
+
 
 def to_float(c):
     return {
@@ -25,11 +27,13 @@ def to_float(c):
         "close": float(c["close"]),
     }
 
+
 def format_price(x):
     try:
         return f"{float(x):,.2f}"
-    except:
+    except Exception:
         return "-"
+
 
 # ---------------- TREND ----------------
 
@@ -46,6 +50,7 @@ def trend_htf(candles):
         return "SELL"
 
     return None
+
 
 # ---------------- STRONG FVG ----------------
 
@@ -84,6 +89,7 @@ def strong_fvg(candles):
 
     return None
 
+
 # ---------------- SWEEP ----------------
 
 def detect_sweep(candles):
@@ -104,23 +110,24 @@ def detect_sweep(candles):
 
     return None
 
+
 # ---------------- CANDLE ----------------
 
 def strong_bull(c):
     total = c["high"] - c["low"]
+    if total <= 0:
+        return False
     body = c["close"] - c["open"]
-    return (
-        c["close"] > c["open"]
-        and body > total * 0.7
-    )
+    return c["close"] > c["open"] and body > total * 0.7
+
 
 def strong_bear(c):
     total = c["high"] - c["low"]
+    if total <= 0:
+        return False
     body = c["open"] - c["close"]
-    return (
-        c["close"] < c["open"]
-        and body > total * 0.7
-    )
+    return c["close"] < c["open"] and body > total * 0.7
+
 
 # ---------------- MAIN ----------------
 
@@ -136,13 +143,22 @@ def get_multi_timeframe_analysis(market, symbol):
         "c1h": [to_float(c) for c in c1h],
     }
 
-def evaluate_signal_engine(data):
 
+def evaluate_signal_engine(data):
     if not data:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {
+            "signal_type": "NO CLEAR SETUP",
+            "trigger_price": None,
+        }
 
     c15 = data["c15"]
     c1h = data["c1h"]
+
+    if not c15 or not c1h:
+        return {
+            "signal_type": "NO CLEAR SETUP",
+            "trigger_price": None,
+        }
 
     price = c15[0]["close"]
 
@@ -151,16 +167,25 @@ def evaluate_signal_engine(data):
     sweep = detect_sweep(c15)
 
     if not trend or not fvg:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {
+            "signal_type": "NO CLEAR SETUP",
+            "trigger_price": price,
+        }
 
     fvg_side, low, high = fvg
 
     if trend != fvg_side:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {
+            "signal_type": "NO CLEAR SETUP",
+            "trigger_price": price,
+        }
 
-    # 🔥 PRO FILTER: require sweep
+    # PRO FILTER: require sweep
     if sweep != trend:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {
+            "signal_type": "NO CLEAR SETUP",
+            "trigger_price": price,
+        }
 
     in_zone = low <= price <= high
     last = c15[0]
@@ -203,4 +228,7 @@ def evaluate_signal_engine(data):
             "signal_score": 95,
         }
 
-    return {"signal_type": "NO CLEAR SETUP"}
+    return {
+        "signal_type": "NO CLEAR SETUP",
+        "trigger_price": price,
+    }
