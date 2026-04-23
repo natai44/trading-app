@@ -16,13 +16,13 @@ SCAN_SYMBOLS = [
 ]
 
 SCAN_INTERVAL_SECONDS = 300
-MAX_SIGNALS_PER_DAY = 2
+MAX_SIGNALS_PER_DAY = 3
 MIN_SIGNAL_GAP_SECONDS = 5400
 OPPOSITE_LOCK_SECONDS = 14400
 STATE_FILE = "bot_state.json"
 
-MIN_AI_SCORE_MAIN = 85
-MIN_AI_SCORE_OFF = 90
+MIN_AI_SCORE_MAIN = 75
+MIN_AI_SCORE_OFF = 85
 
 
 def utc_now():
@@ -133,12 +133,16 @@ def build_ai_score(signal: dict, session: str):
         return 0, 0, 0.0
 
     base = safe_float(signal.get("signal_score"), 0.0)
-    triggers = 3
-
     mode = signal.get("setup_mode", "NONE")
+
     if mode == "PRO":
-        base += 15
         triggers = 4
+        base += 12
+    elif mode == "ACTIVE":
+        triggers = 2
+        base += 4
+    else:
+        triggers = 1
 
     if session == "LONDON":
         base += 8
@@ -162,19 +166,20 @@ def build_ai_score(signal: dict, session: str):
         base += 5
     if rr >= 1.5:
         base += 5
-    if rr >= 2.0:
-        base += 5
 
     return min(int(base), 100), triggers, rr
 
 
 def build_signal_message(market: str, symbol: str, signal: dict, ai_score: int, session: str, trigger_count: int, rr: float):
+    mode = signal.get("setup_mode", "-")
+    icon = "🔥" if mode == "PRO" else "⚡"
+
     return (
-        f"🔥 {signal['signal_type']}\n\n"
+        f"{icon} {signal['signal_type']}\n\n"
         f"Market: {market.upper()} | Symbol: {symbol}\n"
         f"Session: {session}\n"
         f"Direction: {signal.get('preferred_side', '-')}\n"
-        f"Mode: {signal.get('setup_mode', '-')}\n"
+        f"Mode: {mode}\n"
         f"AI Score: {ai_score}\n"
         f"Triggers: {trigger_count}\n"
         f"RR: {rr:.2f}\n\n"
@@ -184,6 +189,26 @@ def build_signal_message(market: str, symbol: str, signal: dict, ai_score: int, 
         f"TP2: {format_price(signal.get('tp2'))}\n"
         f"TP Large: {format_price(signal.get('tp_large'))}"
     )
+
+
+def send_live_performance(result_label: str):
+    s = STATE["stats"]
+    closed = s["closed_trades"]
+    winrate = (s["wins"] / closed * 100) if closed > 0 else 0.0
+
+    msg = (
+        f"{result_label}\n\n"
+        f"📊 LIVE PERFORMANCE\n"
+        f"Closed Trades: {closed}\n"
+        f"Wins: {s['wins']}\n"
+        f"Losses: {s['losses']}\n"
+        f"Break-even: {s['breakeven']}\n"
+        f"TP1 Hits: {s['tp1_hits']}\n"
+        f"TP2 Hits: {s['tp2_hits']}\n"
+        f"TP Large Hits: {s['tp_large_hits']}\n"
+        f"Winrate: {winrate:.1f}%"
+    )
+    send_telegram(msg)
 
 
 def build_stats_message():
@@ -283,7 +308,6 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
     price = safe_float(price_raw)
     side = trade["side"]
 
-    # TP1 -> secure small gain / BE
     if side == "BUY" and not trade["tp1_sent"] and price >= trade["tp1"]:
         trade["tp1_sent"] = True
         trade["sl"] = trade["entry"]
@@ -308,7 +332,6 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
             f"SL moved to Break Even."
         )
 
-    # TP2 -> stronger trail
     if side == "BUY" and not trade["tp2_sent"] and price >= trade["tp2"]:
         trade["tp2_sent"] = True
         STATE["stats"]["tp2_hits"] += 1
@@ -331,7 +354,6 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
             f"SL trailed to: {format_price(trade['sl'])}"
         )
 
-    # If price keeps moving, extend TP
     if trade["tp2_sent"] and not trade["closed"]:
         extended = maybe_extend_trade(trade, signal)
         if extended:
@@ -343,14 +365,13 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
                 f"New SL: {format_price(trade['sl'])}"
             )
 
-    # final TP
     if side == "BUY" and not trade["tp_large_sent"] and price >= trade["tp_large"]:
         trade["tp_large_sent"] = True
         trade["closed"] = True
         STATE["stats"]["tp_large_hits"] += 1
         STATE["stats"]["wins"] += 1
         STATE["stats"]["closed_trades"] += 1
-        send_telegram(f"🏁 TP LARGE HIT\n\n{symbol} BUY")
+        send_live_performance(f"🏁 TP LARGE HIT\n\n{symbol} BUY")
 
     if side == "SELL" and not trade["tp_large_sent"] and price <= trade["tp_large"]:
         trade["tp_large_sent"] = True
@@ -358,28 +379,27 @@ def maybe_update_open_trade(market: str, symbol: str, signal: dict):
         STATE["stats"]["tp_large_hits"] += 1
         STATE["stats"]["wins"] += 1
         STATE["stats"]["closed_trades"] += 1
-        send_telegram(f"🏁 TP LARGE HIT\n\n{symbol} SELL")
+        send_live_performance(f"🏁 TP LARGE HIT\n\n{symbol} SELL")
 
-    # stop / BE exit
     if side == "BUY" and not trade["closed"] and price <= trade["sl"]:
         trade["closed"] = True
         STATE["stats"]["closed_trades"] += 1
         if trade["tp1_sent"]:
             STATE["stats"]["breakeven"] += 1
-            send_telegram(f"🔁 BREAK EVEN EXIT\n\n{symbol} BUY")
+            send_live_performance(f"🔁 BREAK EVEN EXIT\n\n{symbol} BUY")
         else:
             STATE["stats"]["losses"] += 1
-            send_telegram(f"❌ STOP LOSS HIT\n\n{symbol} BUY")
+            send_live_performance(f"❌ STOP LOSS HIT\n\n{symbol} BUY")
 
     if side == "SELL" and not trade["closed"] and price >= trade["sl"]:
         trade["closed"] = True
         STATE["stats"]["closed_trades"] += 1
         if trade["tp1_sent"]:
             STATE["stats"]["breakeven"] += 1
-            send_telegram(f"🔁 BREAK EVEN EXIT\n\n{symbol} SELL")
+            send_live_performance(f"🔁 BREAK EVEN EXIT\n\n{symbol} SELL")
         else:
             STATE["stats"]["losses"] += 1
-            send_telegram(f"❌ STOP LOSS HIT\n\n{symbol} SELL")
+            send_live_performance(f"❌ STOP LOSS HIT\n\n{symbol} SELL")
 
     save_state()
 
@@ -431,7 +451,7 @@ def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, t
 
 
 def run():
-    print("🔥 BOT V8 RUNNING", flush=True)
+    print("🔥 BOT HYBRID RUNNING", flush=True)
 
     while True:
         try:
