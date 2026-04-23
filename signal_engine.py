@@ -173,7 +173,7 @@ def active_bull(c):
     body = c["close"] - c["open"]
     return (
         c["close"] > c["open"]
-        and body > total * 0.55
+        and body > total * 0.50
     )
 
 
@@ -184,7 +184,7 @@ def active_bear(c):
     body = c["open"] - c["close"]
     return (
         c["close"] < c["open"]
-        and body > total * 0.55
+        and body > total * 0.50
     )
 
 
@@ -284,7 +284,7 @@ def evaluate_signal_engine(data):
     # =======================
     if loose_zone:
         side, low, high = loose_zone
-        buffer = price * 0.0005
+        buffer = price * 0.0008
         in_zone = (low - buffer) <= price <= (high + buffer)
 
         sweep_ok = (sweep == trend) or (sweep is None)
