@@ -511,5 +511,6 @@ def run():
             time.sleep(SCAN_INTERVAL_SECONDS)
 
 
-if __name__ == "__main__":
+if name == "__main__":
+    send_telegram("TEST BOT MESSAGE")
     run()
