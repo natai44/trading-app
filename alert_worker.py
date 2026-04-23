@@ -511,6 +511,6 @@ def run():
             time.sleep(SCAN_INTERVAL_SECONDS)
 
 
-if name == "__main__":
+if __name__ == "__main__":
     send_telegram("🔥 TEST PRIVATE MESSAGE")
     run()
