@@ -512,5 +512,5 @@ def run():
 
 
 if name == "__main__":
-    send_telegram("TEST BOT MESSAGE")
+    send_telegram("🔥 TEST PRIVATE MESSAGE")
     run()
