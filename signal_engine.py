@@ -287,7 +287,7 @@ def evaluate_signal_engine(data):
         buffer = price * 0.0008
         in_zone = (low - buffer) <= price <= (high + buffer)
 
-        sweep_ok = (sweep == trend) or (sweep is None)
+        sweep_ok = True
         momentum_ok = (
             (trend == "BUY" and last["close"] > last["open"])
             or (trend == "SELL" and last["close"] < last["open"])
