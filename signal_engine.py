@@ -28,6 +28,13 @@ def to_float(c):
     }
 
 
+def format_price(x):
+    try:
+        return f"{float(x):,.2f}"
+    except Exception:
+        return "-"
+
+
 def trend_htf(candles):
     if len(candles) < 20:
         return None
@@ -56,7 +63,8 @@ def active_fvg(candles):
     if total <= 0:
         return None
 
-    if impulse / total < 0.4:
+    strength = impulse / total
+    if strength < 0.40:
         return None
 
     if c1["high"] < c3["low"]:
@@ -68,12 +76,34 @@ def active_fvg(candles):
     return None
 
 
-def active_bull(c):
+def recent_high(candles, start, end):
+    chunk = candles[start:end]
+    if not chunk:
+        return None
+    return max(c["high"] for c in chunk)
+
+
+def recent_low(candles, start, end):
+    chunk = candles[start:end]
+    if not chunk:
+        return None
+    return min(c["low"] for c in chunk)
+
+
+def candle_buy(c):
     return c["close"] > c["open"]
 
 
-def active_bear(c):
+def candle_sell(c):
     return c["close"] < c["open"]
+
+
+def valid_tp(entry, sl, tp1):
+    risk = abs(entry - sl)
+    reward = abs(tp1 - entry)
+    if risk <= 0:
+        return False
+    return reward >= risk * 0.7
 
 
 def get_multi_timeframe_analysis(market, symbol):
@@ -92,81 +122,144 @@ def get_multi_timeframe_analysis(market, symbol):
 
 
 def evaluate_signal_engine(data):
-
     if not data:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": None}
 
     c5 = data["c5"]
     c15 = data["c15"]
     c1h = data["c1h"]
 
+    if not c5 or not c15 or not c1h or len(c5) < 5 or len(c15) < 30 or len(c1h) < 20:
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": None}
+
     price = c5[0]["close"]
     last5 = c5[0]
 
     trend = trend_htf(c1h)
-    fvg = active_fvg(c15)
+    if not trend:
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
-    if not trend or not fvg:
-        return {"signal_type": "NO CLEAR SETUP"}
+    zone = active_fvg(c15)
+    if not zone:
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
-    side, low, high = fvg
+    side, zone_low, zone_high = zone
 
     if trend != side:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
-    # Zone Check
+    # 1H position filter: don't buy too high / sell too low
+    h1_high = recent_high(c1h, 0, 20)
+    h1_low = recent_low(c1h, 0, 20)
+
+    if h1_high is None or h1_low is None:
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+    h1_range = max(h1_high - h1_low, 1e-9)
+    h1_pos = (price - h1_low) / h1_range
+
+    if trend == "BUY" and h1_pos > 0.88:
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+    if trend == "SELL" and h1_pos < 0.12:
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+    # 15m zone, slightly flexible
     buffer = price * 0.001
-    in_zone = (low - buffer) <= price <= (high + buffer)
+    in_zone = (zone_low - buffer) <= price <= (zone_high + buffer)
 
     if not in_zone:
-        return {"signal_type": "NO CLEAR SETUP"}
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
-    # 5m Entry Timing
-    if trend == "BUY" and not active_bull(last5):
-        return {"signal_type": "NO CLEAR SETUP"}
+    # 5m entry timing only
+    if trend == "BUY" and not candle_buy(last5):
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
-    if trend == "SELL" and not active_bear(last5):
-        return {"signal_type": "NO CLEAR SETUP"}
+    if trend == "SELL" and not candle_sell(last5):
+        return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
-    # SL bleibt Struktur (15m)
+    # BUY
     if trend == "BUY":
-        sl = min(c["low"] for c in c15[:5])
+        sl_15 = recent_low(c15, 0, 5)
+        sl_1h = recent_low(c1h, 0, 5)
+
+        if sl_15 is None or sl_1h is None:
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+        sl = min(sl_15, sl_1h, zone_low)
+
         if sl >= price:
-            return {"signal_type": "NO CLEAR SETUP"}
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+        tp1 = recent_high(c15, 5, 15)
+        tp2 = recent_high(c15, 15, 30)
+        tp_large = recent_high(c1h, 0, 20)
+
+        if tp1 is None or tp2 is None or tp_large is None:
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
         risk = price - sl
+
+        tp1 = max(tp1, price + risk * 0.8)
+        tp2 = max(tp2, tp1)
+        tp_large = max(tp_large, tp2)
+
+        if not valid_tp(price, sl, tp1):
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
         return {
             "signal_type": "BUY ENTRY READY",
             "preferred_side": "BUY",
             "entry_price": price,
             "sl_price": sl,
-            "tp1": price + risk * 1,
-            "tp2": price + risk * 2,
-            "tp_large": price + risk * 3,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp_large": tp_large,
             "trigger_price": price,
             "setup_mode": "ACTIVE",
-            "signal_score": 80,
+            "signal_score": 82,
         }
 
+    # SELL
     if trend == "SELL":
-        sl = max(c["high"] for c in c15[:5])
+        sl_15 = recent_high(c15, 0, 5)
+        sl_1h = recent_high(c1h, 0, 5)
+
+        if sl_15 is None or sl_1h is None:
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+        sl = max(sl_15, sl_1h, zone_high)
+
         if sl <= price:
-            return {"signal_type": "NO CLEAR SETUP"}
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
+
+        tp1 = recent_low(c15, 5, 15)
+        tp2 = recent_low(c15, 15, 30)
+        tp_large = recent_low(c1h, 0, 20)
+
+        if tp1 is None or tp2 is None or tp_large is None:
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
         risk = sl - price
+
+        tp1 = min(tp1, price - risk * 0.8)
+        tp2 = min(tp2, tp1)
+        tp_large = min(tp_large, tp2)
+
+        if not valid_tp(price, sl, tp1):
+            return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
 
         return {
             "signal_type": "SELL ENTRY READY",
             "preferred_side": "SELL",
             "entry_price": price,
             "sl_price": sl,
-            "tp1": price - risk * 1,
-            "tp2": price - risk * 2,
-            "tp_large": price - risk * 3,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp_large": tp_large,
             "trigger_price": price,
             "setup_mode": "ACTIVE",
-            "signal_score": 80,
+            "signal_score": 82,
         }
 
-    return {"signal_type": "NO CLEAR SETUP"}
+    return {"signal_type": "NO CLEAR SETUP", "trigger_price": price}
