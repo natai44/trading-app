@@ -414,12 +414,12 @@ def can_send_new_signal(market: str, symbol: str, signal: dict, ai_score: int, t
     session = active_session_name()
 
     if session in ["LONDON", "NEW YORK"]:
-        if rr < 1.0:
+        if rr < 0.7:
             return False, "RR low"
         if ai_score < MIN_AI_SCORE_MAIN:
             return False, "AI too low"
     else:
-        if rr < 1.0:
+        if rr < 0.7:
             return False, "RR low off session"
         if ai_score < MIN_AI_SCORE_OFF:
             return False, "AI too low off session"
