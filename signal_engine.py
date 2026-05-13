@@ -161,6 +161,10 @@ def valid_rr(entry, sl, tp1):
 
 
 def build_buy(price, sl, tp1, tp2, tp_large, mode, score):
+    tp1 = price + 25
+    tp2 = price + 50
+    tp_large = price + 90
+
     return {
         "signal_type": "BUY ENTRY READY",
         "preferred_side": "BUY",
@@ -176,6 +180,10 @@ def build_buy(price, sl, tp1, tp2, tp_large, mode, score):
 
 
 def build_sell(price, sl, tp1, tp2, tp_large, mode, score):
+    tp1 = price - 25
+    tp2 = price - 50
+    tp_large = price - 90
+
     return {
         "signal_type": "SELL ENTRY READY",
         "preferred_side": "SELL",
