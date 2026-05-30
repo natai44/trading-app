@@ -55,116 +55,27 @@ def recent_low(candles, start, end):
     return min(c["low"] for c in part)
 
 
-def get_d1_levels(c1d):
-    if len(c1d) < 2:
-        return None, None
-    prev_day = c1d[1]
-    return prev_day["high"], prev_day["low"]
+def candle_body(c):
+    return abs(c["close"] - c["open"])
 
 
-def wick_buy_1h(c):
-    body = abs(c["close"] - c["open"])
-    total = c["high"] - c["low"]
-    if total <= 0:
-        return False
-
-    lower_wick = min(c["open"], c["close"]) - c["low"]
-    upper_wick = c["high"] - max(c["open"], c["close"])
-
-    return (
-        c["close"] > c["open"]
-        and lower_wick > body * 1.3
-        and lower_wick > upper_wick
-    )
+def upper_wick(c):
+    return c["high"] - max(c["open"], c["close"])
 
 
-def wick_sell_1h(c):
-    body = abs(c["close"] - c["open"])
-    total = c["high"] - c["low"]
-    if total <= 0:
-        return False
-
-    upper_wick = c["high"] - max(c["open"], c["close"])
-    lower_wick = min(c["open"], c["close"]) - c["low"]
-
-    return (
-        c["close"] < c["open"]
-        and upper_wick > body * 1.3
-        and upper_wick > lower_wick
-    )
+def lower_wick(c):
+    return min(c["open"], c["close"]) - c["low"]
 
 
-def sweep_buy(c1h, d1_low):
-    last = c1h[1]
-    prev_low = recent_low(c1h, 2, 8)
-    if prev_low is None:
-        return False
-
-    return (
-        last["low"] < prev_low and last["close"] > prev_low
-    ) or (
-        last["low"] < d1_low and last["close"] > d1_low
-    )
+def bullish(c):
+    return c["close"] > c["open"]
 
 
-def sweep_sell(c1h, d1_high):
-    last = c1h[1]
-    prev_high = recent_high(c1h, 2, 8)
-    if prev_high is None:
-        return False
-
-    return (
-        last["high"] > prev_high and last["close"] < prev_high
-    ) or (
-        last["high"] > d1_high and last["close"] < d1_high
-    )
-
-
-def rejection_buy_1h(c, d1_low):
-    return c["low"] <= d1_low and c["close"] > d1_low
-
-
-def rejection_sell_1h(c, d1_high):
-    return c["high"] >= d1_high and c["close"] < d1_high
-
-
-def active_fvg(c15):
-    if len(c15) < 5:
-        return None
-
-    c1 = c15[3]
-    c2 = c15[2]
-    c3 = c15[1]
-
-    total = c2["high"] - c2["low"]
-    impulse = abs(c2["close"] - c2["open"])
-
-    if total <= 0:
-        return None
-
-    if impulse / total < 0.30:
-        return None
-
-    if c1["high"] < c3["low"]:
-        return ("BUY", c1["high"], c3["low"])
-
-    if c1["low"] > c3["high"]:
-        return ("SELL", c3["high"], c1["low"])
-
-    return None
-
-
-def valid_rr(entry, sl, tp1):
-    risk = abs(entry - sl)
-    reward = abs(tp1 - entry)
-    return risk > 0 and reward >= risk * 0.70
+def bearish(c):
+    return c["close"] < c["open"]
 
 
 def build_buy(price, sl, tp1, tp2, tp_large, mode, score):
-    tp1 = price + 25
-    tp2 = price + 50
-    tp_large = price + 90
-
     return {
         "signal_type": "BUY ENTRY READY",
         "preferred_side": "BUY",
@@ -180,10 +91,6 @@ def build_buy(price, sl, tp1, tp2, tp_large, mode, score):
 
 
 def build_sell(price, sl, tp1, tp2, tp_large, mode, score):
-    tp1 = price - 25
-    tp2 = price - 50
-    tp_large = price - 90
-
     return {
         "signal_type": "SELL ENTRY READY",
         "preferred_side": "SELL",
@@ -198,18 +105,179 @@ def build_sell(price, sl, tp1, tp2, tp_large, mode, score):
     }
 
 
+def valid_rr(entry, sl, tp1):
+    risk = abs(entry - sl)
+    reward = abs(tp1 - entry)
+    return risk > 0 and reward >= risk * 0.70
+
+
+# ---------------- LIQUIDITY ----------------
+
+def get_liquidity_high(c1h):
+    # liquidity above = recent 1H swing/equal highs before sweep candle
+    return recent_high(c1h, 2, 18)
+
+
+def get_liquidity_low(c1h):
+    # liquidity below = recent 1H swing/equal lows before sweep candle
+    return recent_low(c1h, 2, 18)
+
+
+def detect_1h_sweep(c1h):
+    """
+    Uses last CLOSED 1H candle = c1h[1]
+    BUY sweep: takes liquidity low and closes back above
+    SELL sweep: takes liquidity high and closes back below
+    """
+    if len(c1h) < 20:
+        return None
+
+    sweep_candle = c1h[1]
+    liq_high = get_liquidity_high(c1h)
+    liq_low = get_liquidity_low(c1h)
+
+    if liq_high is None or liq_low is None:
+        return None
+
+    body = candle_body(sweep_candle)
+    if body <= 0:
+        body = 0.01
+
+    # SELL sweep/rejection
+    sell_sweep = (
+        sweep_candle["high"] > liq_high
+        and sweep_candle["close"] < liq_high
+        and upper_wick(sweep_candle) > body * 1.2
+    )
+
+    # BUY sweep/rejection
+    buy_sweep = (
+        sweep_candle["low"] < liq_low
+        and sweep_candle["close"] > liq_low
+        and lower_wick(sweep_candle) > body * 1.2
+    )
+
+    if sell_sweep and not buy_sweep:
+        return {
+            "side": "SELL",
+            "liquidity": liq_high,
+            "sweep_extreme": sweep_candle["high"],
+            "sweep_candle": sweep_candle,
+        }
+
+    if buy_sweep and not sell_sweep:
+        return {
+            "side": "BUY",
+            "liquidity": liq_low,
+            "sweep_extreme": sweep_candle["low"],
+            "sweep_candle": sweep_candle,
+        }
+
+    return None
+
+
+# ---------------- 15M RETEST ----------------
+
+def retest_confirmed(c15, sweep):
+    """
+    Uses last CLOSED 15m candle = c15[1]
+    Retest must return into sweep-zone and close direction.
+    """
+    if len(c15) < 20 or not sweep:
+        return False
+
+    c = c15[1]
+    side = sweep["side"]
+    liq = sweep["liquidity"]
+    extreme = sweep["sweep_extreme"]
+
+    if side == "BUY":
+        zone_low = extreme
+        zone_high = liq
+
+        touched_zone = c["low"] <= zone_high and c["high"] >= zone_low
+        confirmed = bullish(c) and c["close"] > liq
+
+        return touched_zone and confirmed
+
+    if side == "SELL":
+        zone_low = liq
+        zone_high = extreme
+
+        touched_zone = c["high"] >= zone_low and c["low"] <= zone_high
+        confirmed = bearish(c) and c["close"] < liq
+
+        return touched_zone and confirmed
+
+    return False
+
+
+# ---------------- TP TARGETS ----------------
+
+def get_buy_targets(entry, sl, c1h, c15):
+    highs = []
+
+    for c in c15[2:50]:
+        if c["high"] > entry:
+            highs.append(c["high"])
+
+    for c in c1h[2:40]:
+        if c["high"] > entry:
+            highs.append(c["high"])
+
+    highs = sorted(set(highs))
+
+    risk = entry - sl
+
+    tp1 = highs[0] if len(highs) >= 1 else entry + risk * 1.0
+    tp2 = highs[1] if len(highs) >= 2 else max(tp1, entry + risk * 1.7)
+    tp_large = highs[2] if len(highs) >= 3 else max(tp2, entry + risk * 2.5)
+
+    tp1 = max(tp1, entry + risk * 0.8)
+    tp2 = max(tp2, tp1)
+    tp_large = max(tp_large, tp2)
+
+    return tp1, tp2, tp_large
+
+
+def get_sell_targets(entry, sl, c1h, c15):
+    lows = []
+
+    for c in c15[2:50]:
+        if c["low"] < entry:
+            lows.append(c["low"])
+
+    for c in c1h[2:40]:
+        if c["low"] < entry:
+            lows.append(c["low"])
+
+    lows = sorted(set(lows), reverse=True)
+
+    risk = sl - entry
+
+    tp1 = lows[0] if len(lows) >= 1 else entry - risk * 1.0
+    tp2 = lows[1] if len(lows) >= 2 else min(tp1, entry - risk * 1.7)
+    tp_large = lows[2] if len(lows) >= 3 else min(tp2, entry - risk * 2.5)
+
+    tp1 = min(tp1, entry - risk * 0.8)
+    tp2 = min(tp2, tp1)
+    tp_large = min(tp_large, tp2)
+
+    return tp1, tp2, tp_large
+
+
+# ---------------- MAIN DATA ----------------
+
 def get_multi_timeframe_analysis(market, symbol):
     c15 = get_candles(symbol, "15min")
     c1h = get_candles(symbol, "1h")
-    c1d = get_candles(symbol, "1day", outputsize=10)
 
-    if not c15 or not c1h or not c1d:
+    if not c15 or not c1h:
         return {}
 
     return {
         "c15": [to_float(c) for c in c15],
         "c1h": [to_float(c) for c in c1h],
-        "c1d": [to_float(c) for c in c1d],
     }
 
 
@@ -219,179 +287,63 @@ def evaluate_signal_engine(data):
 
     c15 = data.get("c15", [])
     c1h = data.get("c1h", [])
-    c1d = data.get("c1d", [])
 
-    if len(c15) < 30 or len(c1h) < 20 or len(c1d) < 2:
+    if len(c15) < 50 or len(c1h) < 40:
         return no_setup(None)
 
-    price = c15[0]["close"]
-    last_1h = c1h[1]
+    # Entry price = last closed 15m close
+    price = c15[1]["close"]
 
-    d1_high, d1_low = get_d1_levels(c1d)
-    if d1_high is None or d1_low is None:
+    sweep = detect_1h_sweep(c1h)
+    if not sweep:
         return no_setup(price)
 
-    d1_range = max(d1_high - d1_low, 1e-9)
-    d1_mid = (d1_high + d1_low) / 2
+    if not retest_confirmed(c15, sweep):
+        return no_setup(price)
 
-    zone_buffer = d1_range * 0.12
-    breakout_buffer = d1_range * 0.03
-    retest_buffer = d1_range * 0.08
+    side = sweep["side"]
+    buffer = max(price * 0.0005, 2.0)
 
-    near_d1_low = price <= d1_low + zone_buffer
-    near_d1_high = price >= d1_high - zone_buffer
-
-    breakout_buy = last_1h["close"] > d1_high + breakout_buffer
-    breakout_sell = last_1h["close"] < d1_low - breakout_buffer
-
-    fvg = active_fvg(c15)
-
-    # =========================
-    # D1 ZONE BUY
-    # D1 Zone → 1H Wick/Sweep/Rejection → Entry
-    # =========================
-    if near_d1_low and not breakout_sell:
-        confirmation = (
-            wick_buy_1h(last_1h)
-            or sweep_buy(c1h, d1_low)
-            or rejection_buy_1h(last_1h, d1_low)
-        )
-
-        if not confirmation:
-            return no_setup(price)
-
-        sl_struct = recent_low(c1h, 1, 8)
-        if sl_struct is None:
-            return no_setup(price)
-
-        sl = min(sl_struct, last_1h["low"], d1_low)
+    if side == "BUY":
+        sl = sweep["sweep_extreme"] - buffer
 
         if sl >= price:
             return no_setup(price)
 
-        risk = price - sl
-
-        tp1 = max(d1_mid, price + risk * 1.0)
-        tp2 = max(d1_high, tp1, price + risk * 1.7)
-        tp_large = max(d1_high + d1_range * 0.25, tp2, price + risk * 2.5)
+        tp1, tp2, tp_large = get_buy_targets(price, sl, c1h, c15)
 
         if not valid_rr(price, sl, tp1):
             return no_setup(price)
 
-        return build_buy(price, sl, tp1, tp2, tp_large, "D1_ZONE_BUY", 90)
-
-    # =========================
-    # D1 ZONE SELL
-    # D1 Zone → 1H Wick/Sweep/Rejection → Entry
-    # =========================
-    if near_d1_high and not breakout_buy:
-        confirmation = (
-            wick_sell_1h(last_1h)
-            or sweep_sell(c1h, d1_high)
-            or rejection_sell_1h(last_1h, d1_high)
+        return build_buy(
+            price=price,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp_large=tp_large,
+            mode="LIQ_SWEEP_RETEST_BUY",
+            score=92,
         )
 
-        if not confirmation:
-            return no_setup(price)
-
-        sl_struct = recent_high(c1h, 1, 8)
-        if sl_struct is None:
-            return no_setup(price)
-
-        sl = max(sl_struct, last_1h["high"], d1_high)
+    if side == "SELL":
+        sl = sweep["sweep_extreme"] + buffer
 
         if sl <= price:
             return no_setup(price)
 
-        risk = sl - price
-
-        tp1 = min(d1_mid, price - risk * 1.0)
-        tp2 = min(d1_low, tp1, price - risk * 1.7)
-        tp_large = min(d1_low - d1_range * 0.25, tp2, price - risk * 2.5)
+        tp1, tp2, tp_large = get_sell_targets(price, sl, c1h, c15)
 
         if not valid_rr(price, sl, tp1):
             return no_setup(price)
 
-        return build_sell(price, sl, tp1, tp2, tp_large, "D1_ZONE_SELL", 90)
-
-    # =========================
-    # BREAKOUT BUY
-    # D1 Breakout → Retest OR FVG → Entry
-    # =========================
-    if breakout_buy:
-        retest = abs(price - d1_high) <= retest_buffer
-
-        fvg_ok = False
-        zone_low = d1_high
-
-        if fvg and fvg[0] == "BUY":
-            _, fvg_low, fvg_high = fvg
-            fvg_buffer = price * 0.0008
-            if (fvg_low - fvg_buffer) <= price <= (fvg_high + fvg_buffer):
-                fvg_ok = True
-                zone_low = fvg_low
-
-        if not (retest or fvg_ok):
-            return no_setup(price)
-
-        sl_struct = recent_low(c1h, 1, 8)
-        if sl_struct is None:
-            return no_setup(price)
-
-        sl = min(sl_struct, zone_low, d1_high)
-
-        if sl >= price:
-            return no_setup(price)
-
-        risk = price - sl
-
-        tp1 = max(price + risk * 1.0, d1_high + d1_range * 0.15)
-        tp2 = max(price + risk * 1.7, d1_high + d1_range * 0.35)
-        tp_large = max(price + risk * 2.5, d1_high + d1_range * 0.60)
-
-        if not valid_rr(price, sl, tp1):
-            return no_setup(price)
-
-        return build_buy(price, sl, tp1, tp2, tp_large, "D1_BREAKOUT_BUY", 92)
-
-    # =========================
-    # BREAKOUT SELL
-    # D1 Breakout → Retest OR FVG → Entry
-    # =========================
-    if breakout_sell:
-        retest = abs(price - d1_low) <= retest_buffer
-
-        fvg_ok = False
-        zone_high = d1_low
-
-        if fvg and fvg[0] == "SELL":
-            _, fvg_low, fvg_high = fvg
-            fvg_buffer = price * 0.0008
-            if (fvg_low - fvg_buffer) <= price <= (fvg_high + fvg_buffer):
-                fvg_ok = True
-                zone_high = fvg_high
-
-        if not (retest or fvg_ok):
-            return no_setup(price)
-
-        sl_struct = recent_high(c1h, 1, 8)
-        if sl_struct is None:
-            return no_setup(price)
-
-        sl = max(sl_struct, zone_high, d1_low)
-
-        if sl <= price:
-            return no_setup(price)
-
-        risk = sl - price
-
-        tp1 = min(price - risk * 1.0, d1_low - d1_range * 0.15)
-        tp2 = min(price - risk * 1.7, d1_low - d1_range * 0.35)
-        tp_large = min(price - risk * 2.5, d1_low - d1_range * 0.60)
-
-        if not valid_rr(price, sl, tp1):
-            return no_setup(price)
-
-        return build_sell(price, sl, tp1, tp2, tp_large, "D1_BREAKOUT_SELL", 92)
+        return build_sell(
+            price=price,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp_large=tp_large,
+            mode="LIQ_SWEEP_RETEST_SELL",
+            score=92,
+        )
 
     return no_setup(price)
