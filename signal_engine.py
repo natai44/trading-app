@@ -1,7 +1,8 @@
+import os
 import requests
 
 BASE_URL = "https://api.twelvedata.com"
-API_KEY = "8f8f55c79aa54b789bd3177ce55e224e"
+API_KEY = os.getenv("8f8f55c79aa54b789bd3177ce55e224e")
 
 
 def get_candles(symbol, interval, outputsize=120):
@@ -55,218 +56,173 @@ def recent_low(candles, start, end):
     return min(c["low"] for c in part)
 
 
-def candle_body(c):
-    return abs(c["close"] - c["open"])
-
-
-def upper_wick(c):
-    return c["high"] - max(c["open"], c["close"])
-
-
-def lower_wick(c):
-    return min(c["open"], c["close"]) - c["low"]
-
-
-def bullish(c):
-    return c["close"] > c["open"]
-
-
-def bearish(c):
-    return c["close"] < c["open"]
-
-
-def build_buy(price, sl, tp1, tp2, tp_large, mode, score):
-    return {
-        "signal_type": "BUY ENTRY READY",
-        "preferred_side": "BUY",
-        "entry_price": price,
-        "sl_price": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp_large": tp_large,
-        "trigger_price": price,
-        "setup_mode": mode,
-        "signal_score": score,
-    }
-
-
-def build_sell(price, sl, tp1, tp2, tp_large, mode, score):
-    return {
-        "signal_type": "SELL ENTRY READY",
-        "preferred_side": "SELL",
-        "entry_price": price,
-        "sl_price": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp_large": tp_large,
-        "trigger_price": price,
-        "setup_mode": mode,
-        "signal_score": score,
-    }
-
-
-def valid_rr(entry, sl, tp1):
-    risk = abs(entry - sl)
-    reward = abs(tp1 - entry)
-    return risk > 0 and reward >= risk * 0.70
-
-
-# ---------------- LIQUIDITY ----------------
-
-def get_liquidity_high(c1h):
-    # liquidity above = recent 1H swing/equal highs before sweep candle
-    return recent_high(c1h, 2, 18)
-
-
-def get_liquidity_low(c1h):
-    # liquidity below = recent 1H swing/equal lows before sweep candle
-    return recent_low(c1h, 2, 18)
-
-
-def detect_1h_sweep(c1h):
-    """
-    Uses last CLOSED 1H candle = c1h[1]
-    BUY sweep: takes liquidity low and closes back above
-    SELL sweep: takes liquidity high and closes back below
-    """
+def trend_1h(c1h):
     if len(c1h) < 20:
         return None
 
-    sweep_candle = c1h[1]
-    liq_high = get_liquidity_high(c1h)
-    liq_low = get_liquidity_low(c1h)
+    last = c1h[0]["close"]
+    prev = c1h[10]["close"]
 
-    if liq_high is None or liq_low is None:
+    if last > prev:
+        return "BUY"
+    if last < prev:
+        return "SELL"
+    return None
+
+
+def detect_fvg(c15):
+    if len(c15) < 5:
         return None
 
-    body = candle_body(sweep_candle)
-    if body <= 0:
-        body = 0.01
+    c1 = c15[2]
+    c2 = c15[1]
+    c3 = c15[0]
 
-    # SELL sweep/rejection
-    sell_sweep = (
-        sweep_candle["high"] > liq_high
-        and sweep_candle["close"] < liq_high
-        and upper_wick(sweep_candle) > body * 1.2
-    )
+    total = c2["high"] - c2["low"]
+    impulse = abs(c2["close"] - c2["open"])
 
-    # BUY sweep/rejection
-    buy_sweep = (
-        sweep_candle["low"] < liq_low
-        and sweep_candle["close"] > liq_low
-        and lower_wick(sweep_candle) > body * 1.2
-    )
+    if total <= 0:
+        return None
 
-    if sell_sweep and not buy_sweep:
-        return {
-            "side": "SELL",
-            "liquidity": liq_high,
-            "sweep_extreme": sweep_candle["high"],
-            "sweep_candle": sweep_candle,
-        }
+    if impulse / total < 0.35:
+        return None
 
-    if buy_sweep and not sell_sweep:
-        return {
-            "side": "BUY",
-            "liquidity": liq_low,
-            "sweep_extreme": sweep_candle["low"],
-            "sweep_candle": sweep_candle,
-        }
+    if c1["high"] < c3["low"]:
+        return ("BUY", c1["high"], c3["low"])
+
+    if c1["low"] > c3["high"]:
+        return ("SELL", c3["high"], c1["low"])
 
     return None
 
 
-# ---------------- 15M RETEST ----------------
+def detect_bos(c15):
+    if len(c15) < 15:
+        return None
 
-def retest_confirmed(c15, sweep):
-    """
-    Uses last CLOSED 15m candle = c15[1]
-    Retest must return into sweep-zone and close direction.
-    """
-    if len(c15) < 20 or not sweep:
-        return False
+    last = c15[0]
+    prev_high = recent_high(c15, 1, 12)
+    prev_low = recent_low(c15, 1, 12)
 
-    c = c15[1]
-    side = sweep["side"]
-    liq = sweep["liquidity"]
-    extreme = sweep["sweep_extreme"]
+    if prev_high is None or prev_low is None:
+        return None
 
+    if last["close"] > prev_high:
+        return "BUY"
+    if last["close"] < prev_low:
+        return "SELL"
+
+    return None
+
+
+def detect_choch(c15, c1h):
+    if len(c15) < 20 or len(c1h) < 20:
+        return None
+
+    htf = trend_1h(c1h)
+    bos = detect_bos(c15)
+
+    if htf and bos and htf != bos:
+        return bos
+
+    return bos
+
+
+def detect_sweep(c15):
+    if len(c15) < 8:
+        return None
+
+    last = c15[0]
+    prev_high = recent_high(c15, 1, 8)
+    prev_low = recent_low(c15, 1, 8)
+
+    if prev_high is None or prev_low is None:
+        return None
+
+    if last["high"] > prev_high and last["close"] < prev_high:
+        return "SELL"
+
+    if last["low"] < prev_low and last["close"] > prev_low:
+        return "BUY"
+
+    return None
+
+
+def candle_confirm(c, side):
     if side == "BUY":
-        zone_low = extreme
-        zone_high = liq
-
-        touched_zone = c["low"] <= zone_high and c["high"] >= zone_low
-        confirmed = bullish(c) and c["close"] > liq
-
-        return touched_zone and confirmed
-
+        return c["close"] > c["open"]
     if side == "SELL":
-        zone_low = liq
-        zone_high = extreme
-
-        touched_zone = c["high"] >= zone_low and c["low"] <= zone_high
-        confirmed = bearish(c) and c["close"] < liq
-
-        return touched_zone and confirmed
-
+        return c["close"] < c["open"]
     return False
 
 
-# ---------------- TP TARGETS ----------------
+def make_targets(entry, sl, side):
+    risk = abs(entry - sl)
 
-def get_buy_targets(entry, sl, c1h, c15):
-    highs = []
+    if side == "BUY":
+        return entry + risk * 1.0, entry + risk * 1.7, entry + risk * 2.5
 
-    for c in c15[2:50]:
-        if c["high"] > entry:
-            highs.append(c["high"])
+    if side == "SELL":
+        return entry - risk * 1.0, entry - risk * 1.7, entry - risk * 2.5
 
-    for c in c1h[2:40]:
-        if c["high"] > entry:
-            highs.append(c["high"])
-
-    highs = sorted(set(highs))
-
-    risk = entry - sl
-
-    tp1 = highs[0] if len(highs) >= 1 else entry + risk * 1.0
-    tp2 = highs[1] if len(highs) >= 2 else max(tp1, entry + risk * 1.7)
-    tp_large = highs[2] if len(highs) >= 3 else max(tp2, entry + risk * 2.5)
-
-    tp1 = max(tp1, entry + risk * 0.8)
-    tp2 = max(tp2, tp1)
-    tp_large = max(tp_large, tp2)
-
-    return tp1, tp2, tp_large
+    return None, None, None
 
 
-def get_sell_targets(entry, sl, c1h, c15):
-    lows = []
+def valid_risk(entry, sl):
+    risk = abs(entry - sl)
 
-    for c in c15[2:50]:
-        if c["low"] < entry:
-            lows.append(c["low"])
+    # Gold Schutz: kein Mini-SL und kein riesiger SL
+    if risk < 8:
+        return False
+    if risk > 55:
+        return False
 
-    for c in c1h[2:40]:
-        if c["low"] < entry:
-            lows.append(c["low"])
-
-    lows = sorted(set(lows), reverse=True)
-
-    risk = sl - entry
-
-    tp1 = lows[0] if len(lows) >= 1 else entry - risk * 1.0
-    tp2 = lows[1] if len(lows) >= 2 else min(tp1, entry - risk * 1.7)
-    tp_large = lows[2] if len(lows) >= 3 else min(tp2, entry - risk * 2.5)
-
-    tp1 = min(tp1, entry - risk * 0.8)
-    tp2 = min(tp2, tp1)
-    tp_large = min(tp_large, tp2)
-
-    return tp1, tp2, tp_large
+    return True
 
 
-# ---------------- MAIN DATA ----------------
+def get_structure_sl(c15, c1h, side, zone_low, zone_high):
+    if side == "BUY":
+        sl_15 = recent_low(c15, 0, 8)
+        sl_1h = recent_low(c1h, 0, 4)
+
+        if sl_15 is None or sl_1h is None:
+            return None
+
+        return min(sl_15, zone_low)
+
+    if side == "SELL":
+        sl_15 = recent_high(c15, 0, 8)
+        sl_1h = recent_high(c1h, 0, 4)
+
+        if sl_15 is None or sl_1h is None:
+            return None
+
+        return max(sl_15, zone_high)
+
+    return None
+
+
+def build_signal(side, price, sl, tp1, tp2, tp_large, score, triggers, fvg, sweep, bos, choch, magnet):
+    return {
+        "signal_type": f"{side} ENTRY READY",
+        "preferred_side": side,
+        "entry_price": price,
+        "sl_price": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp_large": tp_large,
+        "trigger_price": price,
+        "setup_mode": "ACTIVE",
+        "signal_score": score,
+        "trigger_count": triggers,
+        "fvg": fvg,
+        "ob": False,
+        "sweep": sweep,
+        "bos": bos,
+        "choch": choch,
+        "magnet": magnet,
+    }
+
 
 def get_multi_timeframe_analysis(market, symbol):
     c15 = get_candles(symbol, "15min")
@@ -288,62 +244,97 @@ def evaluate_signal_engine(data):
     c15 = data.get("c15", [])
     c1h = data.get("c1h", [])
 
-    if len(c15) < 50 or len(c1h) < 40:
+    if len(c15) < 30 or len(c1h) < 20:
         return no_setup(None)
 
-    # Entry price = last closed 15m close
-    price = c15[1]["close"]
+    price = c15[0]["close"]
+    last = c15[0]
 
-    sweep = detect_1h_sweep(c1h)
-    if not sweep:
+    htf = trend_1h(c1h)
+    fvg = detect_fvg(c15)
+    bos_side = detect_bos(c15)
+    choch_side = detect_choch(c15, c1h)
+    sweep_side = detect_sweep(c15)
+
+    if not htf or not fvg:
         return no_setup(price)
 
-    if not retest_confirmed(c15, sweep):
+    fvg_side, zone_low, zone_high = fvg
+
+    magnet = "UP" if htf == "BUY" else "DOWN"
+
+    # Hauptseite: Magnet + FVG müssen passen
+    if fvg_side != htf:
         return no_setup(price)
 
-    side = sweep["side"]
-    buffer = max(price * 0.0005, 2.0)
+    side = htf
 
-    if side == "BUY":
-        sl = sweep["sweep_extreme"] - buffer
+    # Preis muss nahe/innerhalb FVG sein
+    buffer = price * 0.0007
+    in_zone = (zone_low - buffer) <= price <= (zone_high + buffer)
 
-        if sl >= price:
-            return no_setup(price)
+    if not in_zone:
+        return no_setup(price)
 
-        tp1, tp2, tp_large = get_buy_targets(price, sl, c1h, c15)
+    if not candle_confirm(last, side):
+        return no_setup(price)
 
-        if not valid_rr(price, sl, tp1):
-            return no_setup(price)
+    triggers = 0
 
-        return build_buy(
-            price=price,
-            sl=sl,
-            tp1=tp1,
-            tp2=tp2,
-            tp_large=tp_large,
-            mode="LIQ_SWEEP_RETEST_BUY",
-            score=92,
-        )
+    fvg_yes = True
+    bos_yes = bos_side == side
+    choch_yes = choch_side == side
+    sweep_yes = sweep_side == side
 
-    if side == "SELL":
-        sl = sweep["sweep_extreme"] + buffer
+    if fvg_yes:
+        triggers += 1
+    if bos_yes:
+        triggers += 1
+    if choch_yes:
+        triggers += 1
+    if sweep_yes:
+        triggers += 1
+    if magnet in ["UP", "DOWN"]:
+        triggers += 1
 
-        if sl <= price:
-            return no_setup(price)
+    # Mindestens 3 Trigger, Sweep nicht Pflicht
+    if triggers < 3:
+        return no_setup(price)
 
-        tp1, tp2, tp_large = get_sell_targets(price, sl, c1h, c15)
+    sl = get_structure_sl(c15, c1h, side, zone_low, zone_high)
 
-        if not valid_rr(price, sl, tp1):
-            return no_setup(price)
+    if sl is None:
+        return no_setup(price)
 
-        return build_sell(
-            price=price,
-            sl=sl,
-            tp1=tp1,
-            tp2=tp2,
-            tp_large=tp_large,
-            mode="LIQ_SWEEP_RETEST_SELL",
-            score=92,
-        )
+    if side == "BUY" and sl >= price:
+        return no_setup(price)
 
-    return no_setup(price)
+    if side == "SELL" and sl <= price:
+        return no_setup(price)
+
+    if not valid_risk(price, sl):
+        return no_setup(price)
+
+    tp1, tp2, tp_large = make_targets(price, sl, side)
+
+    if tp1 == tp2 or tp2 == tp_large:
+        return no_setup(price)
+
+    score = 80 + triggers * 4
+    score = min(score, 100)
+
+    return build_signal(
+        side=side,
+        price=price,
+        sl=sl,
+        tp1=tp1,
+        tp2=tp2,
+        tp_large=tp_large,
+        score=score,
+        triggers=triggers,
+        fvg=True,
+        sweep=sweep_yes,
+        bos=bos_yes,
+        choch=choch_yes,
+        magnet=magnet,
+    )
