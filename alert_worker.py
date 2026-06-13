@@ -13,8 +13,7 @@ from signal_engine import (
     format_price,
 )
 
-TELEGRAM_BOT_TOKEN = os.getenv("8785866877:AAE8QLAQmBT72Azad1QKYFKmtWI6wQdHUqs
-")
+TELEGRAM_BOT_TOKEN = os.getenv("8785866877:AAE8QLAQmBT72Azad1QKYFKmtWI6wQdHUqs")
 TELEGRAM_CHAT_ID = os.getenv("1080439188")
 
 SCAN_SYMBOLS = [
