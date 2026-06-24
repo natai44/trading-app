@@ -244,14 +244,14 @@ def entry_5m(c5, side):
         retest = retest_5m_buy(c5)
         fvg_ok = fvg and fvg[0] == "BUY"
         sweep_low = sweep_5m_buy(c5)
-        return bos and (fvg_ok or retest), bos, fvg_ok, retest, sweep_low
+        return (bos or fvg_ok or retest), bos, fvg_ok, retest, sweep_low
 
     if side == "SELL":
         bos = bos_5m_sell(c5)
         retest = retest_5m_sell(c5)
         fvg_ok = fvg and fvg[0] == "SELL"
         sweep_high = sweep_5m_sell(c5)
-        return bos and (fvg_ok or retest), bos, fvg_ok, retest, sweep_high
+        return (bos or fvg_ok or retest), bos, fvg_ok, retest, sweep_high
 
     return False, False, False, False, None
 
